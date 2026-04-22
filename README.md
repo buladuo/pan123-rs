@@ -45,7 +45,7 @@ sudo cp target/release/pan123 /usr/local/bin/
 
 ```powershell
 # 克隆仓库
-git clone https://github.com/yourusername/pan123-rs.git
+git clone https://github.com/buladuo/pan123-rs.git
 cd pan123-rs
 
 # 编译安装
@@ -58,7 +58,7 @@ cargo build --release
 
 ### 预编译二进制文件
 
-从 [Releases](https://github.com/yourusername/pan123-rs/releases) 页面下载对应平台的二进制文件。
+从 [Releases](https://github.com/buladuo/pan123-rs/releases) 页面下载对应平台的二进制文件。
 
 ## 快速开始
 
