@@ -1,4 +1,4 @@
-﻿use thiserror::Error;
+use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, Pan123Error>;
 
@@ -63,25 +63,18 @@ impl Pan123Error {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Pan123Error::Io { .. }
-                | Pan123Error::Http { .. }
-                | Pan123Error::Timeout { .. }
+            Pan123Error::Io { .. } | Pan123Error::Http { .. } | Pan123Error::Timeout { .. }
         )
     }
 
     pub fn is_auth_error(&self) -> bool {
-        matches!(
-            self,
-            Pan123Error::AuthRequired | Pan123Error::InvalidToken
-        )
+        matches!(self, Pan123Error::AuthRequired | Pan123Error::InvalidToken)
     }
 
     pub fn is_client_error(&self) -> bool {
         matches!(
             self,
-            Pan123Error::InvalidPath(_)
-                | Pan123Error::FileConflict { .. }
-                | Pan123Error::Config(_)
+            Pan123Error::InvalidPath(_) | Pan123Error::FileConflict { .. } | Pan123Error::Config(_)
         )
     }
 

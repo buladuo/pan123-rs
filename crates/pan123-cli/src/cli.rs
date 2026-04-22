@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand, ValueEnum};
-use comfy_table::{presets, Attribute, Cell, Color, ContentArrangement, Table};
+use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table, presets};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use owo_colors::OwoColorize;
 use pan123_sdk::config;
@@ -471,9 +471,20 @@ impl Pan123Cli {
     }
 
     fn run_interactive(&mut self) -> Result<()> {
-        println!("\n{}", "╔═══════════════════════════════════════════════════════════╗".bright_cyan());
-        println!("{}", "║            📦 123pan 交互式终端 - 云盘管理工具            ║".bright_cyan().bold());
-        println!("{}", "╚═══════════════════════════════════════════════════════════╝".bright_cyan());
+        println!(
+            "\n{}",
+            "╔═══════════════════════════════════════════════════════════╗".bright_cyan()
+        );
+        println!(
+            "{}",
+            "║            📦 123pan 交互式终端 - 云盘管理工具            ║"
+                .bright_cyan()
+                .bold()
+        );
+        println!(
+            "{}",
+            "╚═══════════════════════════════════════════════════════════╝".bright_cyan()
+        );
         println!(
             "{}",
             "💡 按 Tab 补全命令和路径 | 输入 help 查看帮助 | 输入 exit 退出\n".dimmed()
@@ -520,7 +531,7 @@ impl Pan123Cli {
                         }
                     };
                     let argv = std::iter::once("pan123".to_string())
-                        .chain(args.into_iter())
+                        .chain(args)
                         .collect::<Vec<_>>();
                     match CliArgs::try_parse_from(argv) {
                         Ok(parsed) => {
@@ -548,11 +559,7 @@ impl Pan123Cli {
     }
 
     fn print_help(&self) {
-        println!(
-            "\n{} {}\n",
-            "📚".to_string(),
-            "可用命令".bright_cyan().bold()
-        );
+        println!("\n📚 {}\n", "可用命令".bright_cyan().bold());
 
         let mut table = Table::new();
         table
@@ -581,7 +588,9 @@ impl Pan123Cli {
 
         for (cmd, desc) in commands {
             table.add_row(vec![
-                Cell::new(cmd).fg(Color::Magenta).add_attribute(Attribute::Bold),
+                Cell::new(cmd)
+                    .fg(Color::Magenta)
+                    .add_attribute(Attribute::Bold),
                 Cell::new(desc).fg(Color::White),
             ]);
         }
@@ -843,24 +852,38 @@ impl Pan123Cli {
             .load_preset(presets::UTF8_FULL)
             .set_content_arrangement(ContentArrangement::Dynamic)
             .set_header(vec![
-                Cell::new("图标").add_attribute(Attribute::Bold).fg(Color::Cyan),
-                Cell::new("类型").add_attribute(Attribute::Bold).fg(Color::Cyan),
-                Cell::new("名称").add_attribute(Attribute::Bold).fg(Color::Cyan),
-                Cell::new("大小").add_attribute(Attribute::Bold).fg(Color::Cyan),
-                Cell::new("文件 ID").add_attribute(Attribute::Bold).fg(Color::Cyan),
+                Cell::new("图标")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Cyan),
+                Cell::new("类型")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Cyan),
+                Cell::new("名称")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Cyan),
+                Cell::new("大小")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Cyan),
+                Cell::new("文件 ID")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Cyan),
             ]);
 
         for item in items {
             let icon = icons::get_file_icon(&item.file_name, item.is_dir());
 
             let type_cell = if item.is_dir() {
-                Cell::new("目录").fg(Color::Blue).add_attribute(Attribute::Bold)
+                Cell::new("目录")
+                    .fg(Color::Blue)
+                    .add_attribute(Attribute::Bold)
             } else {
                 Cell::new("文件").fg(Color::Green)
             };
 
             let name_cell = if item.is_dir() {
-                Cell::new(&item.file_name).fg(Color::Blue).add_attribute(Attribute::Bold)
+                Cell::new(&item.file_name)
+                    .fg(Color::Blue)
+                    .add_attribute(Attribute::Bold)
             } else {
                 Cell::new(&item.file_name).fg(Color::White)
             };
@@ -931,8 +954,7 @@ impl Pan123Cli {
 
     fn print_upload_report(&self, report: &UploadDirectoryReport) {
         println!(
-            "\n{} {} {} {} {} {}\n",
-            "📤".to_string(),
+            "\n📤 {} {} {} {} {}\n",
             "上传总结".bright_cyan().bold(),
             "━".repeat(40).bright_black(),
             format!("✓ {}", report.uploaded_count()).green().bold(),
@@ -961,9 +983,15 @@ impl Pan123Cli {
             .load_preset(presets::UTF8_FULL)
             .set_content_arrangement(ContentArrangement::Dynamic)
             .set_header(vec![
-                Cell::new("类型").add_attribute(Attribute::Bold).fg(Color::Yellow),
-                Cell::new("文件路径").add_attribute(Attribute::Bold).fg(Color::Yellow),
-                Cell::new("错误信息").add_attribute(Attribute::Bold).fg(Color::Yellow),
+                Cell::new("类型")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Yellow),
+                Cell::new("文件路径")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Yellow),
+                Cell::new("错误信息")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Yellow),
             ]);
 
         for failure in &report.failed {
@@ -997,31 +1025,43 @@ impl Pan123Cli {
             .set_content_arrangement(ContentArrangement::Dynamic);
 
         table.add_row(vec![
-            Cell::new("名称").fg(Color::Cyan).add_attribute(Attribute::Bold),
+            Cell::new("名称")
+                .fg(Color::Cyan)
+                .add_attribute(Attribute::Bold),
             Cell::new(&item.file_name).fg(Color::White),
         ]);
 
         table.add_row(vec![
-            Cell::new("类型").fg(Color::Cyan).add_attribute(Attribute::Bold),
+            Cell::new("类型")
+                .fg(Color::Cyan)
+                .add_attribute(Attribute::Bold),
             if item.is_dir() {
-                Cell::new("📁 目录").fg(Color::Blue).add_attribute(Attribute::Bold)
+                Cell::new("📁 目录")
+                    .fg(Color::Blue)
+                    .add_attribute(Attribute::Bold)
             } else {
                 Cell::new("📄 文件").fg(Color::Green)
             },
         ]);
 
         table.add_row(vec![
-            Cell::new("文件 ID").fg(Color::Cyan).add_attribute(Attribute::Bold),
+            Cell::new("文件 ID")
+                .fg(Color::Cyan)
+                .add_attribute(Attribute::Bold),
             Cell::new(item.file_id.to_string()).fg(Color::White),
         ]);
 
         table.add_row(vec![
-            Cell::new("父目录 ID").fg(Color::Cyan).add_attribute(Attribute::Bold),
+            Cell::new("父目录 ID")
+                .fg(Color::Cyan)
+                .add_attribute(Attribute::Bold),
             Cell::new(item.parent_file_id.to_string()).fg(Color::White),
         ]);
 
         table.add_row(vec![
-            Cell::new("大小").fg(Color::Cyan).add_attribute(Attribute::Bold),
+            Cell::new("大小")
+                .fg(Color::Cyan)
+                .add_attribute(Attribute::Bold),
             if item.is_dir() {
                 Cell::new("-").fg(Color::DarkGrey)
             } else {
@@ -1031,25 +1071,33 @@ impl Pan123Cli {
 
         if let Some(status) = item.status {
             table.add_row(vec![
-                Cell::new("状态").fg(Color::Cyan).add_attribute(Attribute::Bold),
+                Cell::new("状态")
+                    .fg(Color::Cyan)
+                    .add_attribute(Attribute::Bold),
                 Cell::new(status.to_string()).fg(Color::White),
             ]);
         }
 
         if let Some(etag) = &item.etag {
             table.add_row(vec![
-                Cell::new("Etag").fg(Color::Cyan).add_attribute(Attribute::Bold),
+                Cell::new("Etag")
+                    .fg(Color::Cyan)
+                    .add_attribute(Attribute::Bold),
                 Cell::new(etag).fg(Color::White),
             ]);
         }
 
         table.add_row(vec![
-            Cell::new("路径").fg(Color::Cyan).add_attribute(Attribute::Bold),
+            Cell::new("路径")
+                .fg(Color::Cyan)
+                .add_attribute(Attribute::Bold),
             Cell::new(self.path_from_file_id(item.file_id)?).fg(Color::Blue),
         ]);
 
         table.add_row(vec![
-            Cell::new("原始大小").fg(Color::Cyan).add_attribute(Attribute::Bold),
+            Cell::new("原始大小")
+                .fg(Color::Cyan)
+                .add_attribute(Attribute::Bold),
             Cell::new(format!("{} bytes", item.size)).fg(Color::White),
         ]);
 
@@ -1071,8 +1119,7 @@ impl Pan123Cli {
             return;
         }
         println!(
-            "\n{} {} {}\n",
-            "🔍".to_string(),
+            "\n🔍 {} {}\n",
             "找到".bright_cyan().bold(),
             format!("{} 个匹配项", results.len()).bright_white()
         );
@@ -1082,24 +1129,38 @@ impl Pan123Cli {
             .load_preset(presets::UTF8_FULL)
             .set_content_arrangement(ContentArrangement::Dynamic)
             .set_header(vec![
-                Cell::new("图标").add_attribute(Attribute::Bold).fg(Color::Cyan),
-                Cell::new("类型").add_attribute(Attribute::Bold).fg(Color::Cyan),
-                Cell::new("名称").add_attribute(Attribute::Bold).fg(Color::Cyan),
-                Cell::new("路径").add_attribute(Attribute::Bold).fg(Color::Cyan),
-                Cell::new("ID").add_attribute(Attribute::Bold).fg(Color::Cyan),
+                Cell::new("图标")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Cyan),
+                Cell::new("类型")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Cyan),
+                Cell::new("名称")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Cyan),
+                Cell::new("路径")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Cyan),
+                Cell::new("ID")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Cyan),
             ]);
 
         for result in results {
             let icon = icons::get_file_icon(&result.item.file_name, result.item.is_dir());
 
             let type_cell = if result.item.is_dir() {
-                Cell::new("目录").fg(Color::Blue).add_attribute(Attribute::Bold)
+                Cell::new("目录")
+                    .fg(Color::Blue)
+                    .add_attribute(Attribute::Bold)
             } else {
                 Cell::new("文件").fg(Color::Green)
             };
 
             let name_cell = if result.item.is_dir() {
-                Cell::new(&result.item.file_name).fg(Color::Blue).add_attribute(Attribute::Bold)
+                Cell::new(&result.item.file_name)
+                    .fg(Color::Blue)
+                    .add_attribute(Attribute::Bold)
             } else {
                 Cell::new(&result.item.file_name).fg(Color::White)
             };
@@ -1116,6 +1177,7 @@ impl Pan123Cli {
         println!("{table}");
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn find_items(
         &self,
         parent_id: u64,

@@ -1,4 +1,4 @@
-﻿use std::collections::BTreeMap;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -48,7 +48,8 @@ impl RetryPolicy {
 
     pub fn calculate_delay(&self, attempt: usize) -> u64 {
         let mut delay = if self.exponential_backoff {
-            self.base_delay_ms.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1) as u32))
+            self.base_delay_ms
+                .saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1) as u32))
         } else {
             self.base_delay_ms.saturating_mul(attempt as u64)
         };

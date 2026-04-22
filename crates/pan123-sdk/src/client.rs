@@ -59,7 +59,10 @@ impl Pan123Client {
         Self::with_rate_limiter(token, None)
     }
 
-    pub fn with_rate_limiter(token: Option<String>, rate_limiter_config: Option<RateLimiterConfig>) -> Result<Self> {
+    pub fn with_rate_limiter(
+        token: Option<String>,
+        rate_limiter_config: Option<RateLimiterConfig>,
+    ) -> Result<Self> {
         let login_uuid = format!("{:x}", md5::compute(Uuid::new_v4().to_string()));
 
         let mut headers = HeaderMap::new();
@@ -90,9 +93,8 @@ impl Pan123Client {
             .default_headers(headers)
             .build()?;
 
-        let rate_limiter = rate_limiter_config.map(|config| {
-            RateLimiter::new(config.api_requests_per_second)
-        });
+        let rate_limiter =
+            rate_limiter_config.map(|config| RateLimiter::new(config.api_requests_per_second));
 
         let mut instance = Self {
             client,
@@ -131,7 +133,9 @@ impl Pan123Client {
             Err(Pan123Error::Api { .. }) | Err(Pan123Error::AuthRequired) => {
                 TokenCheckStatus::Invalid
             }
-            Err(Pan123Error::Http { .. }) => TokenCheckStatus::Unreachable("network error".to_string()),
+            Err(Pan123Error::Http { .. }) => {
+                TokenCheckStatus::Unreachable("network error".to_string())
+            }
             Err(err) => TokenCheckStatus::Unreachable(err.to_string()),
         }
     }
@@ -437,21 +441,16 @@ impl Pan123Client {
         let mut should_restart = false;
 
         if let Some(meta) = &resume_meta {
-            if !same_resume_target(meta, &link.url, &link.filename) {
-                should_restart = true;
-            } else if meta.total_bytes.is_some()
-                && total_hint.is_some()
-                && meta.total_bytes != total_hint
-            {
-                should_restart = true;
-            } else if etag.is_some() && meta.etag.is_some() && meta.etag != etag {
-                should_restart = true;
-            } else if last_modified.is_some()
-                && meta.last_modified.is_some()
-                && meta.last_modified != last_modified
-            {
-                should_restart = true;
-            } else if temp_path.exists() {
+            should_restart = !same_resume_target(meta, &link.url, &link.filename)
+                || (meta.total_bytes.is_some()
+                    && total_hint.is_some()
+                    && meta.total_bytes != total_hint)
+                || (etag.is_some() && meta.etag.is_some() && meta.etag != etag)
+                || (last_modified.is_some()
+                    && meta.last_modified.is_some()
+                    && meta.last_modified != last_modified);
+
+            if !should_restart && temp_path.exists() {
                 let actual_size = fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0);
                 if actual_size != meta.downloaded_bytes {
                     should_restart = true;
@@ -727,6 +726,7 @@ impl Pan123Client {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn upload_file_inner(
         &self,
         file_path: &Path,
@@ -848,7 +848,6 @@ impl Pan123Client {
             let key = key.clone();
             let upload_id = upload_id.clone();
             let storage_node = storage_node.clone();
-            let retry = retry;
             let progress = progress.clone();
             let transfer_id = transfer_id.to_string();
 
@@ -863,7 +862,10 @@ impl Pan123Client {
                     };
 
                     let auth_url = if multipart {
-                        format!("{}/b/api/file/s3_repare_upload_parts_batch", client.domain())
+                        format!(
+                            "{}/b/api/file/s3_repare_upload_parts_batch",
+                            client.domain()
+                        )
                     } else {
                         format!("{}/b/api/file/s3_upload_object/auth", client.domain())
                     };
@@ -884,13 +886,19 @@ impl Pan123Client {
                         &progress,
                         |_, _| {
                             let auth_res: ApiEnvelope<PresignedUrlsData> = client.send_json(
-                                client.client.post(&auth_url).query(&client.dynamic_params()),
+                                client
+                                    .client
+                                    .post(&auth_url)
+                                    .query(&client.dynamic_params()),
                                 Some(auth_payload.clone()),
                             )?;
                             let mut pre_signed = client.unwrap_data(auth_res)?.presigned_urls;
-                            let put_url = pre_signed.remove(&part_number.to_string()).ok_or_else(|| {
-                                Pan123Error::Operation(format!("missing pre-signed url for part {part_number}"))
-                            })?;
+                            let put_url =
+                                pre_signed.remove(&part_number.to_string()).ok_or_else(|| {
+                                    Pan123Error::Operation(format!(
+                                        "missing pre-signed url for part {part_number}"
+                                    ))
+                                })?;
 
                             client
                                 .client
@@ -970,10 +978,10 @@ impl Pan123Client {
 
         for _ in 0..30 {
             let maybe_file = self.get_file_info(&[temp_file_id])?.into_iter().next();
-            if let Some(file_info) = maybe_file {
-                if file_info.status.unwrap_or_default() == 0 {
-                    return Ok(file_info);
-                }
+            if let Some(file_info) = maybe_file
+                && file_info.status.unwrap_or_default() == 0
+            {
+                return Ok(file_info);
             }
             thread::sleep(Duration::from_secs(1));
         }
@@ -1064,7 +1072,6 @@ impl Pan123Client {
             let tx = tx.clone();
             let client = self.clone();
             let progress = progress.clone();
-            let options = options;
             let handle = thread::spawn(move || {
                 loop {
                     let next = {
@@ -1183,11 +1190,11 @@ impl Pan123Client {
                 None::<Value>,
             )?;
             let data = res.data.clone();
-            if res.code == 200 {
-                if let Some(token) = data.as_ref().and_then(|item| item.token.clone()) {
-                    self.set_token(token)?;
-                    return Ok(());
-                }
+            if res.code == 200
+                && let Some(token) = data.as_ref().and_then(|item| item.token.clone())
+            {
+                self.set_token(token)?;
+                return Ok(());
             }
 
             if res.code == 0 {

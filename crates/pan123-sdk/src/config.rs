@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::error::Result;
 use crate::models::{CwdStore, TokenStore};
@@ -59,7 +59,7 @@ pub fn resume_meta_dir() -> PathBuf {
     path
 }
 
-pub fn resume_meta_path_for(target: &PathBuf) -> PathBuf {
+pub fn resume_meta_path_for(target: &Path) -> PathBuf {
     let digest = format!("{:x}", md5::compute(target.to_string_lossy().as_bytes()));
     resume_meta_dir().join(format!("{digest}.json"))
 }

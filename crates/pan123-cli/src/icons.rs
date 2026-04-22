@@ -3,11 +3,7 @@ pub fn get_file_icon(file_name: &str, is_dir: bool) -> &'static str {
         return "📁";
     }
 
-    let extension = file_name
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
+    let extension = file_name.rsplit('.').next().unwrap_or("").to_lowercase();
 
     match extension.as_str() {
         // Archives
