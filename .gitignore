@@ -35,3 +35,6 @@ desktop.ini
 # 备份文件
 *.bak
 *.backup
+
+# 参考文件
+*.py
