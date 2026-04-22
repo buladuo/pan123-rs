@@ -27,6 +27,7 @@ use crate::models::{
     FileInfoListData, FileListData, PresignedUrlsData, QrGenerateData, QrResultData, SignInData,
     TrafficCheckData, UploadCompleteData, UploadRequestData, UserInfo, WxCodeData,
 };
+use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::transfer::{
     DownloadOptions, ProgressCallback, RetryPolicy, TransferEvent, TransferFailure, TransferKind,
     UploadDirectoryReport, UploadFailureKind, UploadOptions,
@@ -50,10 +51,15 @@ pub struct Pan123Client {
     ucenter_url: String,
     login_uuid: String,
     token: Option<String>,
+    rate_limiter: Option<RateLimiter>,
 }
 
 impl Pan123Client {
     pub fn new(token: Option<String>) -> Result<Self> {
+        Self::with_rate_limiter(token, None)
+    }
+
+    pub fn with_rate_limiter(token: Option<String>, rate_limiter_config: Option<RateLimiterConfig>) -> Result<Self> {
         let login_uuid = format!("{:x}", md5::compute(Uuid::new_v4().to_string()));
 
         let mut headers = HeaderMap::new();
@@ -84,12 +90,17 @@ impl Pan123Client {
             .default_headers(headers)
             .build()?;
 
+        let rate_limiter = rate_limiter_config.map(|config| {
+            RateLimiter::new(config.api_requests_per_second)
+        });
+
         let mut instance = Self {
             client,
             base_url: DEFAULT_BASE_URL.to_string(),
             ucenter_url: DEFAULT_UCENTER_URL.to_string(),
             login_uuid,
             token: token.or_else(config::load_token),
+            rate_limiter,
         };
 
         instance.init_domains()?;
@@ -120,7 +131,7 @@ impl Pan123Client {
             Err(Pan123Error::Api { .. }) | Err(Pan123Error::AuthRequired) => {
                 TokenCheckStatus::Invalid
             }
-            Err(Pan123Error::Http(err)) => TokenCheckStatus::Unreachable(err.to_string()),
+            Err(Pan123Error::Http { .. }) => TokenCheckStatus::Unreachable("network error".to_string()),
             Err(err) => TokenCheckStatus::Unreachable(err.to_string()),
         }
     }
@@ -397,7 +408,9 @@ impl Pan123Client {
         let transfer_id = format!("download:{}", link.filename);
         let temp_path = save_path.with_extension("part");
         let meta_path = config::resume_meta_path_for(&save_path);
-        let total_hint = self.client.head(&link.url).send().ok().and_then(|resp| {
+
+        let head_response = self.client.head(&link.url).send().ok();
+        let total_hint = head_response.as_ref().and_then(|resp| {
             resp.headers()
                 .get(reqwest::header::CONTENT_LENGTH)?
                 .to_str()
@@ -405,14 +418,48 @@ impl Pan123Client {
                 .parse::<u64>()
                 .ok()
         });
-        let resume_meta = load_resume_meta(&meta_path);
+        let etag = head_response.as_ref().and_then(|resp| {
+            resp.headers()
+                .get(reqwest::header::ETAG)?
+                .to_str()
+                .ok()
+                .map(|s| s.to_string())
+        });
+        let last_modified = head_response.as_ref().and_then(|resp| {
+            resp.headers()
+                .get(reqwest::header::LAST_MODIFIED)?
+                .to_str()
+                .ok()
+                .map(|s| s.to_string())
+        });
 
-        if let Some(meta) = &resume_meta
-            && (!same_resume_target(meta, &link.url, &link.filename)
-                || (meta.total_bytes.is_some()
-                    && total_hint.is_some()
-                    && meta.total_bytes != total_hint))
-        {
+        let resume_meta = load_resume_meta(&meta_path);
+        let mut should_restart = false;
+
+        if let Some(meta) = &resume_meta {
+            if !same_resume_target(meta, &link.url, &link.filename) {
+                should_restart = true;
+            } else if meta.total_bytes.is_some()
+                && total_hint.is_some()
+                && meta.total_bytes != total_hint
+            {
+                should_restart = true;
+            } else if etag.is_some() && meta.etag.is_some() && meta.etag != etag {
+                should_restart = true;
+            } else if last_modified.is_some()
+                && meta.last_modified.is_some()
+                && meta.last_modified != last_modified
+            {
+                should_restart = true;
+            } else if temp_path.exists() {
+                let actual_size = fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0);
+                if actual_size != meta.downloaded_bytes {
+                    should_restart = true;
+                }
+            }
+        }
+
+        if should_restart {
             let _ = fs::remove_file(&temp_path);
             let _ = fs::remove_file(&meta_path);
         }
@@ -522,6 +569,10 @@ impl Pan123Client {
                         url: link.url.clone(),
                         filename: link.filename.clone(),
                         total_bytes,
+                        etag: etag.clone(),
+                        last_modified: last_modified.clone(),
+                        downloaded_bytes: existing,
+                        created_at: chrono::Utc::now().timestamp(),
                     },
                 )?;
                 let mut buffer = vec![0u8; 256 * 1024];
@@ -538,6 +589,22 @@ impl Pan123Client {
                     }
                     output.write_all(&buffer[..read])?;
                     downloaded += read as u64;
+
+                    if downloaded % (1024 * 1024) == 0 {
+                        save_resume_meta(
+                            &meta_path,
+                            &DownloadResumeMeta {
+                                url: link.url.clone(),
+                                filename: link.filename.clone(),
+                                total_bytes,
+                                etag: etag.clone(),
+                                last_modified: last_modified.clone(),
+                                downloaded_bytes: downloaded,
+                                created_at: chrono::Utc::now().timestamp(),
+                            },
+                        )?;
+                    }
+
                     self.emit(
                         &progress,
                         TransferEvent::Progress {
@@ -630,6 +697,7 @@ impl Pan123Client {
             options.transfer.retry,
             progress.clone(),
             &transfer_id,
+            options.transfer.parallelism,
         );
         match result {
             Ok(file) => {
@@ -667,6 +735,7 @@ impl Pan123Client {
         retry: RetryPolicy,
         progress: Option<ProgressCallback>,
         transfer_id: &str,
+        parallelism: usize,
     ) -> Result<FileInfo> {
         let metadata = fs::metadata(file_path)?;
         if !metadata.is_file() {
@@ -760,65 +829,114 @@ impl Pan123Client {
         let mut buffer = vec![0u8; slice_size as usize];
         let mut uploaded = 0u64;
 
+        let mut chunks = Vec::new();
         for part_number in 1..=part_count {
-            let auth_url = if multipart {
-                format!("{}/b/api/file/s3_repare_upload_parts_batch", self.domain())
-            } else {
-                format!("{}/b/api/file/s3_upload_object/auth", self.domain())
-            };
-
-            let auth_payload = json!({
-                "bucket": bucket,
-                "key": key,
-                "partNumberStart": part_number,
-                "partNumberEnd": part_number + 1,
-                "uploadId": upload_id,
-                "StorageNode": storage_node
-            });
-            let auth_res: ApiEnvelope<PresignedUrlsData> = self.retry_with_backoff_emit(
-                retry,
-                transfer_id,
-                TransferKind::Upload,
-                &progress,
-                |_, _| {
-                    self.send_json(
-                        self.client.post(&auth_url).query(&self.dynamic_params()),
-                        Some(auth_payload.clone()),
-                    )
-                },
-            )?;
-            let mut pre_signed = self.unwrap_data(auth_res)?.presigned_urls;
-            let put_url = pre_signed.remove(&part_number.to_string()).ok_or_else(|| {
-                Pan123Error::Operation(format!("missing pre-signed url for part {part_number}"))
-            })?;
-
             let read_len = file.read(&mut buffer)?;
-            let chunk = buffer[..read_len].to_vec();
-            self.retry_with_backoff_emit(
-                retry,
-                transfer_id,
-                TransferKind::Upload,
-                &progress,
-                |_, _| {
-                    self.client
-                        .put(&put_url)
-                        .header("Content-Length", read_len.to_string())
-                        .body(chunk.clone())
-                        .send()?
-                        .error_for_status()?;
-                    Ok(())
-                },
-            )?;
-            uploaded += read_len as u64;
-            self.emit(
-                &progress,
-                TransferEvent::Progress {
-                    id: transfer_id.to_string(),
-                    kind: TransferKind::Upload,
-                    bytes: uploaded,
-                    total_bytes: Some(file_size),
-                },
-            );
+            chunks.push((part_number, buffer[..read_len].to_vec()));
+        }
+
+        let chunk_parallelism = parallelism.min(part_count as usize).max(1);
+        let chunks_arc = Arc::new(Mutex::new(chunks));
+        let (tx, rx) = mpsc::channel();
+        let mut handles = Vec::new();
+
+        for _ in 0..chunk_parallelism {
+            let chunks = Arc::clone(&chunks_arc);
+            let tx = tx.clone();
+            let client = self.clone();
+            let bucket = bucket.clone();
+            let key = key.clone();
+            let upload_id = upload_id.clone();
+            let storage_node = storage_node.clone();
+            let retry = retry;
+            let progress = progress.clone();
+            let transfer_id = transfer_id.to_string();
+
+            let handle = thread::spawn(move || {
+                loop {
+                    let next = {
+                        let mut guard = chunks.lock().expect("chunk queue lock poisoned");
+                        guard.pop()
+                    };
+                    let Some((part_number, chunk)) = next else {
+                        break;
+                    };
+
+                    let auth_url = if multipart {
+                        format!("{}/b/api/file/s3_repare_upload_parts_batch", client.domain())
+                    } else {
+                        format!("{}/b/api/file/s3_upload_object/auth", client.domain())
+                    };
+
+                    let auth_payload = json!({
+                        "bucket": bucket,
+                        "key": key,
+                        "partNumberStart": part_number,
+                        "partNumberEnd": part_number + 1,
+                        "uploadId": upload_id,
+                        "StorageNode": storage_node
+                    });
+
+                    let result = client.retry_with_backoff_emit(
+                        retry,
+                        &transfer_id,
+                        TransferKind::Upload,
+                        &progress,
+                        |_, _| {
+                            let auth_res: ApiEnvelope<PresignedUrlsData> = client.send_json(
+                                client.client.post(&auth_url).query(&client.dynamic_params()),
+                                Some(auth_payload.clone()),
+                            )?;
+                            let mut pre_signed = client.unwrap_data(auth_res)?.presigned_urls;
+                            let put_url = pre_signed.remove(&part_number.to_string()).ok_or_else(|| {
+                                Pan123Error::Operation(format!("missing pre-signed url for part {part_number}"))
+                            })?;
+
+                            client
+                                .client
+                                .put(&put_url)
+                                .header("Content-Length", chunk.len().to_string())
+                                .body(chunk.clone())
+                                .send()?
+                                .error_for_status()?;
+                            Ok(chunk.len() as u64)
+                        },
+                    );
+
+                    if tx.send((part_number, result)).is_err() {
+                        break;
+                    }
+                }
+            });
+            handles.push(handle);
+        }
+        drop(tx);
+
+        for (part_number, result) in rx {
+            match result {
+                Ok(bytes) => {
+                    uploaded += bytes;
+                    self.emit(
+                        &progress,
+                        TransferEvent::Progress {
+                            id: transfer_id.to_string(),
+                            kind: TransferKind::Upload,
+                            bytes: uploaded,
+                            total_bytes: Some(file_size),
+                        },
+                    );
+                }
+                Err(err) => {
+                    for handle in handles {
+                        let _ = handle.join();
+                    }
+                    return Err(err.with_context(format!("upload part {part_number} failed")));
+                }
+            }
+        }
+
+        for handle in handles {
+            let _ = handle.join();
         }
 
         let complete_url = format!("{}/b/api/file/upload_complete/v2", self.domain());
@@ -1200,6 +1318,10 @@ impl Pan123Client {
         T: DeserializeOwned,
         B: Serialize,
     {
+        if let Some(limiter) = &self.rate_limiter {
+            limiter.acquire();
+        }
+
         let request = self.with_auth(builder);
         let response = if let Some(body) = body {
             request.json(&body).send()?
@@ -1257,7 +1379,7 @@ impl Pan123Client {
                         return Err(err);
                     }
                     last_err = Some(err);
-                    let backoff = policy.base_delay_ms.saturating_mul(attempt as u64);
+                    let backoff = policy.calculate_delay(attempt);
                     thread::sleep(Duration::from_millis(backoff));
                 }
             }
@@ -1295,7 +1417,7 @@ impl Pan123Client {
                         },
                     );
                     last_err = Some(err);
-                    let backoff = policy.base_delay_ms.saturating_mul(attempt as u64);
+                    let backoff = policy.calculate_delay(attempt);
                     thread::sleep(Duration::from_millis(backoff));
                 }
             }
@@ -1304,7 +1426,7 @@ impl Pan123Client {
     }
 
     fn is_retryable_error(err: &Pan123Error) -> bool {
-        matches!(err, Pan123Error::Io(_) | Pan123Error::Http(_))
+        err.is_retryable()
     }
 }
 
@@ -1376,10 +1498,10 @@ fn value_get<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
 
 fn classify_upload_failure(err: &Pan123Error) -> UploadFailureKind {
     match err {
-        Pan123Error::Io(_) => UploadFailureKind::LocalIo,
-        Pan123Error::Http(_) => UploadFailureKind::Network,
+        Pan123Error::Io { .. } => UploadFailureKind::LocalIo,
+        Pan123Error::Http { .. } => UploadFailureKind::Network,
         Pan123Error::Api { code, .. } if *code == 5060 => UploadFailureKind::Conflict,
-        Pan123Error::Api { .. } | Pan123Error::Json(_) => UploadFailureKind::RemoteApi,
+        Pan123Error::Api { .. } | Pan123Error::Json { .. } => UploadFailureKind::RemoteApi,
         Pan123Error::AuthRequired => UploadFailureKind::Auth,
         Pan123Error::InvalidPath(_) | Pan123Error::NotFound(_) => UploadFailureKind::Validation,
         Pan123Error::Operation(message) => {
@@ -1399,5 +1521,6 @@ fn classify_upload_failure(err: &Pan123Error) -> UploadFailureKind {
                 UploadFailureKind::Unknown
             }
         }
+        _ => UploadFailureKind::Unknown,
     }
 }

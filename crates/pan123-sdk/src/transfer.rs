@@ -8,6 +8,9 @@ use crate::models::FileInfo;
 pub struct RetryPolicy {
     pub max_attempts: usize,
     pub base_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub exponential_backoff: bool,
+    pub jitter: bool,
 }
 
 impl Default for RetryPolicy {
@@ -15,7 +18,51 @@ impl Default for RetryPolicy {
         Self {
             max_attempts: 3,
             base_delay_ms: 750,
+            max_delay_ms: 30_000,
+            exponential_backoff: true,
+            jitter: true,
         }
+    }
+}
+
+impl RetryPolicy {
+    pub fn aggressive() -> Self {
+        Self {
+            max_attempts: 5,
+            base_delay_ms: 500,
+            max_delay_ms: 60_000,
+            exponential_backoff: true,
+            jitter: true,
+        }
+    }
+
+    pub fn conservative() -> Self {
+        Self {
+            max_attempts: 2,
+            base_delay_ms: 1000,
+            max_delay_ms: 10_000,
+            exponential_backoff: false,
+            jitter: false,
+        }
+    }
+
+    pub fn calculate_delay(&self, attempt: usize) -> u64 {
+        let mut delay = if self.exponential_backoff {
+            self.base_delay_ms.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1) as u32))
+        } else {
+            self.base_delay_ms.saturating_mul(attempt as u64)
+        };
+
+        delay = delay.min(self.max_delay_ms);
+
+        if self.jitter {
+            use rand::Rng;
+            let jitter_range = (delay as f64 * 0.2) as u64;
+            let jitter = rand::rng().random_range(0..=jitter_range);
+            delay = delay.saturating_add(jitter);
+        }
+
+        delay
     }
 }
 

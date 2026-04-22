@@ -1,30 +1,36 @@
-use chrono::Local;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 
 use crate::error::Result;
 use crate::models::{CwdStore, TokenStore};
+use crate::secure_storage::SecureStorage;
 
 pub const TOKEN_FILE: &str = "123pan_token.json";
 pub const CWD_FILE: &str = "123pan_cwd.json";
 
 pub fn load_token() -> Option<String> {
+    let storage = SecureStorage::auto(default_state_path(TOKEN_FILE));
+
+    if let Some(token) = storage.load_token() {
+        return Some(token);
+    }
+
     let path = resolve_existing_state_path(TOKEN_FILE)?;
     let text = fs::read_to_string(path).ok()?;
-    let token = serde_json::from_str::<TokenStore>(&text).ok()?;
-    Some(token.token)
+    let token_store = serde_json::from_str::<TokenStore>(&text).ok()?;
+    Some(token_store.token)
 }
 
 pub fn save_token(token: &str) -> Result<()> {
-    let payload = TokenStore {
-        token: token.to_string(),
-        update_time: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-    };
-    fs::write(
-        default_state_path(TOKEN_FILE),
-        serde_json::to_string_pretty(&payload)?,
-    )?;
+    let storage = SecureStorage::auto(default_state_path(TOKEN_FILE));
+    storage.save_token(token)?;
+
+    let legacy_path = default_state_path(TOKEN_FILE);
+    if legacy_path.exists() {
+        let _ = fs::remove_file(legacy_path);
+    }
+
     Ok(())
 }
 

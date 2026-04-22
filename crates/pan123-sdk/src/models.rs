@@ -191,6 +191,10 @@ pub struct DownloadResumeMeta {
     pub url: String,
     pub filename: String,
     pub total_bytes: Option<u64>,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub downloaded_bytes: u64,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
