@@ -1,0 +1,17 @@
+﻿[package]
+name = "pan123-sdk"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chrono.workspace = true
+md5.workspace = true
+qrcode.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
+uuid.workspace = true
+walkdir.workspace = true

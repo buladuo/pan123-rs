@@ -1,0 +1,17 @@
+﻿[package]
+name = "pan123-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "pan123"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+indicatif.workspace = true
+owo-colors.workspace = true
+rustyline.workspace = true
+serde_json.workspace = true
+shlex.workspace = true
+pan123-sdk = { path = "../pan123-sdk" }
