@@ -1,3 +1,37 @@
-﻿/target
+﻿# Rust 编译产物
+/target
+**/target
+Cargo.lock
+
+# 构建产物和发布包
+/dist
+*.tar.gz
+*.zip
+
+# 用户配置和凭证
 123pan_token.json
 123pan_cwd.json
+*.token
+*.credentials
+
+# IDE 和编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 测试和临时文件
+*.tmp
+*.temp
+*.log
+test_output/
+
+# 系统文件
+Thumbs.db
+desktop.ini
+
+# 备份文件
+*.bak
+*.backup
