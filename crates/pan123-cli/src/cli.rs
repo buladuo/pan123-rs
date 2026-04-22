@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand, ValueEnum};
+use comfy_table::{presets, Attribute, Cell, Color, ContentArrangement, Table};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use owo_colors::OwoColorize;
 use pan123_sdk::config;
@@ -23,6 +24,8 @@ use rustyline::hint::Hinter;
 use rustyline::history::DefaultHistory;
 use rustyline::validate::Validator;
 use rustyline::{CompletionType, Config as RustyConfig, Context, Editor, Helper};
+
+use crate::icons;
 
 const COMMANDS: &[&str] = &[
     "login", "info", "pwd", "cd", "ls", "tree", "upload", "download", "mkdir", "rename", "mv",
@@ -468,10 +471,12 @@ impl Pan123Cli {
     }
 
     fn run_interactive(&mut self) -> Result<()> {
-        println!("{}", "123pan 交互式终端".bright_cyan().bold());
+        println!("\n{}", "╔═══════════════════════════════════════════════════════════╗".bright_cyan());
+        println!("{}", "║            📦 123pan 交互式终端 - 云盘管理工具            ║".bright_cyan().bold());
+        println!("{}", "╚═══════════════════════════════════════════════════════════╝".bright_cyan());
         println!(
             "{}",
-            "按 Tab 可补全命令和远端路径。输入 help 查看命令，输入 exit 退出。\n".dimmed()
+            "💡 按 Tab 补全命令和路径 | 输入 help 查看帮助 | 输入 exit 退出\n".dimmed()
         );
 
         let mut editor = build_editor()?;
@@ -544,23 +549,50 @@ impl Pan123Cli {
 
     fn print_help(&self) {
         println!(
-            "{}\n  {}\n  {}\n  {}\n  {}\n  {}\n  {}\n  {}\n  {}\n  {}\n  {}\n  {}\n  {}\n  {}\n  {}\n\n{}",
-            "命令".bright_cyan().bold(),
-            "login".bright_magenta(),
-            "info".bright_magenta(),
-            "pwd".bright_magenta(),
-            "cd <target> [--id]".bright_magenta(),
-            "ls [-p REF] [-l LIMIT]".bright_magenta(),
-            "tree [-p REF] [-d DEPTH]".bright_magenta(),
-            "upload <path> [-p REF] [--jobs N] [--retries N]".bright_magenta(),
-            "download <REF>... [-d DIR] [--retries N]".bright_magenta(),
-            "mkdir <name> [-p REF]".bright_magenta(),
-            "rename <REF> <new_name>".bright_magenta(),
-            "mv <target_ref> <source_ref>...".bright_magenta(),
-            "cp <target_ref> <source_ref>...".bright_magenta(),
-            "rm <REF>...".bright_magenta(),
-            "status|stat <REF> [--json], find <QUERY> [-p REF], refresh [--all], clear".bright_magenta(),
-            "REF 可以是 file_id、id:123、当前目录下的名字，或者 /docs/a.txt、../tmp 这样的路径。find 支持普通包含、通配符 (*.zip) 和基础正则 re:^code。".dimmed()
+            "\n{} {}\n",
+            "📚".to_string(),
+            "可用命令".bright_cyan().bold()
+        );
+
+        let mut table = Table::new();
+        table
+            .load_preset(presets::UTF8_BORDERS_ONLY)
+            .set_content_arrangement(ContentArrangement::Dynamic);
+
+        let commands = vec![
+            ("🔐 login", "登录账号（二维码）"),
+            ("ℹ️  info", "显示用户信息"),
+            ("📍 pwd", "显示当前目录"),
+            ("📂 cd <target>", "切换目录"),
+            ("📋 ls [-p REF] [-l LIMIT]", "列出文件"),
+            ("🌲 tree [-p REF] [-d DEPTH]", "树形显示目录"),
+            ("⬆️  upload <path> [-p REF]", "上传文件/目录"),
+            ("⬇️  download <REF>... [-d DIR]", "下载文件"),
+            ("➕ mkdir <name> [-p REF]", "创建目录"),
+            ("✏️  rename <REF> <new_name>", "重命名"),
+            ("📦 mv <target> <source>...", "移动文件"),
+            ("📋 cp <target> <source>...", "复制文件"),
+            ("🗑️  rm <REF>...", "删除文件（移至回收站）"),
+            ("📊 status <REF> [--json]", "查看文件详情"),
+            ("🔍 find <QUERY> [-p REF]", "搜索文件"),
+            ("🔄 refresh [--all]", "清理缓存"),
+            ("🧹 clear", "清屏"),
+        ];
+
+        for (cmd, desc) in commands {
+            table.add_row(vec![
+                Cell::new(cmd).fg(Color::Magenta).add_attribute(Attribute::Bold),
+                Cell::new(desc).fg(Color::White),
+            ]);
+        }
+
+        println!("{table}");
+        println!(
+            "\n{}\n  {}\n  {}\n  {}\n",
+            "💡 提示:".bright_cyan().bold(),
+            "REF 可以是: file_id、id:123、文件名、/path/to/file".dimmed(),
+            "find 支持: 普通搜索、通配符 (*.zip)、正则 (re:^code)".dimmed(),
+            "使用 --help 查看命令详细参数".dimmed()
         );
     }
 
@@ -805,38 +837,52 @@ impl Pan123Cli {
             println!("{}", "当前目录为空。".dimmed());
             return;
         }
-        println!(
-            "{}  {}  {}  {}",
-            pad_ansi(&"类型".bright_cyan().bold().to_string(), 10),
-            pad_ansi(&"ID".bright_cyan().bold().to_string(), 14),
-            pad_ansi(&"大小".bright_cyan().bold().to_string(), 12),
-            "名称".bright_cyan().bold()
-        );
-        println!("{}", "─".repeat(72).bright_black());
+
+        let mut table = Table::new();
+        table
+            .load_preset(presets::UTF8_FULL)
+            .set_content_arrangement(ContentArrangement::Dynamic)
+            .set_header(vec![
+                Cell::new("图标").add_attribute(Attribute::Bold).fg(Color::Cyan),
+                Cell::new("类型").add_attribute(Attribute::Bold).fg(Color::Cyan),
+                Cell::new("名称").add_attribute(Attribute::Bold).fg(Color::Cyan),
+                Cell::new("大小").add_attribute(Attribute::Bold).fg(Color::Cyan),
+                Cell::new("文件 ID").add_attribute(Attribute::Bold).fg(Color::Cyan),
+            ]);
+
         for item in items {
-            let kind = if item.is_dir() {
-                format!("{}", "目录".bright_blue().bold())
+            let icon = icons::get_file_icon(&item.file_name, item.is_dir());
+
+            let type_cell = if item.is_dir() {
+                Cell::new("目录").fg(Color::Blue).add_attribute(Attribute::Bold)
             } else {
-                format!("{}", "文件".bright_green())
+                Cell::new("文件").fg(Color::Green)
             };
-            let size = if item.is_dir() {
-                format!("{}", "-".dimmed())
+
+            let name_cell = if item.is_dir() {
+                Cell::new(&item.file_name).fg(Color::Blue).add_attribute(Attribute::Bold)
             } else {
-                format!("{}", human_size(item.size).bright_yellow())
+                Cell::new(&item.file_name).fg(Color::White)
             };
-            let name = if item.is_dir() {
-                format!("{}", item.file_name.bright_blue().bold())
+
+            let size_cell = if item.is_dir() {
+                Cell::new("-").fg(Color::DarkGrey)
             } else {
-                format!("{}", item.file_name.bright_white())
+                Cell::new(human_size(item.size)).fg(Color::Yellow)
             };
-            println!(
-                "{}  {}  {}  {}",
-                pad_ansi(&kind, 10),
-                pad_ansi(&format!("{}", item.file_id.to_string().bright_black()), 14),
-                pad_ansi(&size, 12),
-                name
-            );
+
+            let id_cell = Cell::new(item.file_id.to_string()).fg(Color::DarkGrey);
+
+            table.add_row(vec![
+                Cell::new(icon),
+                type_cell,
+                name_cell,
+                size_cell,
+                id_cell,
+            ]);
         }
+
+        println!("{table}");
     }
 
     fn print_tree(
@@ -853,32 +899,30 @@ impl Pan123Cli {
         let total = items.len();
         for (index, item) in items.into_iter().enumerate() {
             let is_last = index + 1 == total;
-            let connector = if is_last { "└──" } else { "├──" };
+            let connector = if is_last { "└─" } else { "├─" };
+            let icon = icons::get_file_icon(&item.file_name, item.is_dir());
+
             let label = if item.is_dir() {
                 format!(
-                    "{} {} {}",
+                    "{} {} {} {}",
                     connector.bright_black(),
-                    "[目录]".bright_blue(),
-                    item.file_name.bright_blue().bold()
+                    icon,
+                    item.file_name.bright_blue().bold(),
+                    format!("({})", item.file_id).dimmed()
                 )
             } else {
                 format!(
-                    "{} {} {}",
+                    "{} {} {} {}",
                     connector.bright_black(),
-                    "[文件]".bright_green(),
-                    item.file_name.bright_white()
+                    icon,
+                    item.file_name.bright_white(),
+                    format!("({})", item.file_id).dimmed()
                 )
             };
-            println!(
-                "{}{} {}{}{}",
-                prefix,
-                label,
-                "(ID:".dimmed(),
-                item.file_id.to_string().bright_black(),
-                ")".dimmed()
-            );
+            println!("{}{}", prefix, label);
+
             if item.is_dir() && depth < max_depth {
-                let next_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+                let next_prefix = format!("{}{}", prefix, if is_last { "  " } else { "│ " });
                 self.print_tree(item.file_id, next_prefix, depth + 1, max_depth)?;
             }
         }
@@ -887,35 +931,50 @@ impl Pan123Cli {
 
     fn print_upload_report(&self, report: &UploadDirectoryReport) {
         println!(
-            "{} {}  {} {}",
+            "\n{} {} {} {} {} {}\n",
+            "📤".to_string(),
             "上传总结".bright_cyan().bold(),
-            format!("成功 {} 个", report.uploaded_count()).green(),
-            format!("失败 {} 个", report.failed_count()).red(),
+            "━".repeat(40).bright_black(),
+            format!("✓ {}", report.uploaded_count()).green().bold(),
+            format!("✗ {}", report.failed_count()).red().bold(),
             if report.is_complete_success() {
-                "(全部完成)".green().to_string()
+                "🎉 全部完成".green().to_string()
             } else {
-                "(部分完成)".yellow().to_string()
+                "⚠️  部分完成".yellow().to_string()
             }
         );
+
         if report.failed.is_empty() {
             return;
         }
+
         let summary = report
             .failure_counts()
             .into_iter()
             .map(|(kind, count)| format!("{}={}", color_failure_kind(kind), count))
             .collect::<Vec<_>>()
             .join(", ");
-        println!("{} {}", "失败分类:".yellow().bold(), summary);
-        println!("{}", "失败文件:".yellow());
+        println!("{} {}\n", "失败分类:".yellow().bold(), summary);
+
+        let mut table = Table::new();
+        table
+            .load_preset(presets::UTF8_FULL)
+            .set_content_arrangement(ContentArrangement::Dynamic)
+            .set_header(vec![
+                Cell::new("类型").add_attribute(Attribute::Bold).fg(Color::Yellow),
+                Cell::new("文件路径").add_attribute(Attribute::Bold).fg(Color::Yellow),
+                Cell::new("错误信息").add_attribute(Attribute::Bold).fg(Color::Yellow),
+            ]);
+
         for failure in &report.failed {
-            println!(
-                "  [{}] {} {}",
-                color_failure_kind(failure.kind),
-                failure.path.display().to_string().bright_white(),
-                failure.message.dimmed()
-            );
+            table.add_row(vec![
+                Cell::new(failure.kind.as_str()).fg(Color::Red),
+                Cell::new(failure.path.display().to_string()).fg(Color::White),
+                Cell::new(&failure.message).fg(Color::DarkGrey),
+            ]);
         }
+
+        println!("{table}");
     }
 
     fn print_status(&self, item: &FileInfo, json_output: bool) -> Result<()> {
@@ -923,66 +982,86 @@ impl Pan123Cli {
             println!("{}", serde_json::to_string_pretty(item)?);
             return Ok(());
         }
-        println!("{}", "条目详情".bright_cyan().bold());
+
+        let icon = icons::get_file_icon(&item.file_name, item.is_dir());
         println!(
-            "{} {}",
-            "名称:".bright_black(),
-            item.file_name.bright_white()
+            "\n{} {} {}",
+            icon,
+            "文件详情".bright_cyan().bold(),
+            "━".repeat(50).bright_black()
         );
-        println!(
-            "{} {}",
-            "类型:".bright_black(),
+
+        let mut table = Table::new();
+        table
+            .load_preset(presets::UTF8_FULL)
+            .set_content_arrangement(ContentArrangement::Dynamic);
+
+        table.add_row(vec![
+            Cell::new("名称").fg(Color::Cyan).add_attribute(Attribute::Bold),
+            Cell::new(&item.file_name).fg(Color::White),
+        ]);
+
+        table.add_row(vec![
+            Cell::new("类型").fg(Color::Cyan).add_attribute(Attribute::Bold),
             if item.is_dir() {
-                "目录".bright_blue().bold().to_string()
+                Cell::new("📁 目录").fg(Color::Blue).add_attribute(Attribute::Bold)
             } else {
-                "文件".bright_green().to_string()
-            }
-        );
-        println!(
-            "{} {}",
-            "文件 ID:".bright_black(),
-            item.file_id.to_string().bright_white()
-        );
-        println!(
-            "{} {}",
-            "父目录 ID:".bright_black(),
-            item.parent_file_id.to_string().bright_white()
-        );
-        println!(
-            "{} {}",
-            "大小:".bright_black(),
+                Cell::new("📄 文件").fg(Color::Green)
+            },
+        ]);
+
+        table.add_row(vec![
+            Cell::new("文件 ID").fg(Color::Cyan).add_attribute(Attribute::Bold),
+            Cell::new(item.file_id.to_string()).fg(Color::White),
+        ]);
+
+        table.add_row(vec![
+            Cell::new("父目录 ID").fg(Color::Cyan).add_attribute(Attribute::Bold),
+            Cell::new(item.parent_file_id.to_string()).fg(Color::White),
+        ]);
+
+        table.add_row(vec![
+            Cell::new("大小").fg(Color::Cyan).add_attribute(Attribute::Bold),
             if item.is_dir() {
-                "-".dimmed().to_string()
+                Cell::new("-").fg(Color::DarkGrey)
             } else {
-                human_size(item.size).bright_yellow().to_string()
-            }
-        );
+                Cell::new(human_size(item.size)).fg(Color::Yellow)
+            },
+        ]);
+
         if let Some(status) = item.status {
-            println!(
-                "{} {}",
-                "状态:".bright_black(),
-                status.to_string().bright_white()
-            );
+            table.add_row(vec![
+                Cell::new("状态").fg(Color::Cyan).add_attribute(Attribute::Bold),
+                Cell::new(status.to_string()).fg(Color::White),
+            ]);
         }
+
         if let Some(etag) = &item.etag {
-            println!("{} {}", "Etag:".bright_black(), etag.bright_white());
+            table.add_row(vec![
+                Cell::new("Etag").fg(Color::Cyan).add_attribute(Attribute::Bold),
+                Cell::new(etag).fg(Color::White),
+            ]);
         }
-        println!(
-            "{} {}",
-            "路径:".bright_black(),
-            self.path_from_file_id(item.file_id)?.bright_blue()
-        );
-        println!(
-            "{} {}",
-            "原始大小:".bright_black(),
-            item.size.to_string().bright_white()
-        );
+
+        table.add_row(vec![
+            Cell::new("路径").fg(Color::Cyan).add_attribute(Attribute::Bold),
+            Cell::new(self.path_from_file_id(item.file_id)?).fg(Color::Blue),
+        ]);
+
+        table.add_row(vec![
+            Cell::new("原始大小").fg(Color::Cyan).add_attribute(Attribute::Bold),
+            Cell::new(format!("{} bytes", item.size)).fg(Color::White),
+        ]);
+
+        println!("{table}");
+
         if let Some(extra) = item.extra.as_object()
             && !extra.is_empty()
         {
-            println!("{}", "其他字段:".bright_black());
+            println!("\n{}", "其他字段:".bright_cyan().bold());
             println!("{}", serde_json::to_string_pretty(&item.extra)?);
         }
+
         Ok(())
     }
 
@@ -992,26 +1071,49 @@ impl Pan123Cli {
             return;
         }
         println!(
-            "{} {}",
-            "匹配结果:".bright_cyan().bold(),
-            results.len().to_string().bright_white()
+            "\n{} {} {}\n",
+            "🔍".to_string(),
+            "找到".bright_cyan().bold(),
+            format!("{} 个匹配项", results.len()).bright_white()
         );
+
+        let mut table = Table::new();
+        table
+            .load_preset(presets::UTF8_FULL)
+            .set_content_arrangement(ContentArrangement::Dynamic)
+            .set_header(vec![
+                Cell::new("图标").add_attribute(Attribute::Bold).fg(Color::Cyan),
+                Cell::new("类型").add_attribute(Attribute::Bold).fg(Color::Cyan),
+                Cell::new("名称").add_attribute(Attribute::Bold).fg(Color::Cyan),
+                Cell::new("路径").add_attribute(Attribute::Bold).fg(Color::Cyan),
+                Cell::new("ID").add_attribute(Attribute::Bold).fg(Color::Cyan),
+            ]);
+
         for result in results {
-            let kind = if result.item.is_dir() {
-                "[目录]".bright_blue().to_string()
+            let icon = icons::get_file_icon(&result.item.file_name, result.item.is_dir());
+
+            let type_cell = if result.item.is_dir() {
+                Cell::new("目录").fg(Color::Blue).add_attribute(Attribute::Bold)
             } else {
-                "[文件]".bright_green().to_string()
+                Cell::new("文件").fg(Color::Green)
             };
-            println!(
-                "{} {} {} {}{}{}",
-                kind,
-                result.path.bright_blue(),
-                result.item.file_name.bright_white(),
-                "(ID:".dimmed(),
-                result.item.file_id.to_string().bright_black(),
-                ")".dimmed()
-            );
+
+            let name_cell = if result.item.is_dir() {
+                Cell::new(&result.item.file_name).fg(Color::Blue).add_attribute(Attribute::Bold)
+            } else {
+                Cell::new(&result.item.file_name).fg(Color::White)
+            };
+
+            table.add_row(vec![
+                Cell::new(icon),
+                type_cell,
+                name_cell,
+                Cell::new(&result.path).fg(Color::Blue),
+                Cell::new(result.item.file_id.to_string()).fg(Color::DarkGrey),
+            ]);
         }
+
+        println!("{table}");
     }
 
     fn find_items(
@@ -1737,32 +1839,6 @@ fn validate_basic_regex(pattern: &str) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn pad_ansi(input: &str, width: usize) -> String {
-    let plain_len = strip_ansi(input).chars().count();
-    if plain_len >= width {
-        input.to_string()
-    } else {
-        format!("{}{}", input, " ".repeat(width - plain_len))
-    }
-}
-
-fn strip_ansi(input: &str) -> String {
-    let mut out = String::new();
-    let mut chars = input.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' {
-            for next in chars.by_ref() {
-                if next == 'm' {
-                    break;
-                }
-            }
-        } else {
-            out.push(ch);
-        }
-    }
-    out
 }
 
 fn wildcard_match(pattern: &str, text: &str) -> bool {

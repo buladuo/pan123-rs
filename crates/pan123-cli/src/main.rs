@@ -1,4 +1,5 @@
 ﻿mod cli;
+mod icons;
 
 use cli::Pan123Cli;
 
