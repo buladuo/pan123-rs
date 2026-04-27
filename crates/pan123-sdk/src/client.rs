@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -91,6 +91,11 @@ impl Pan123Client {
         let client = Client::builder()
             .cookie_store(true)
             .default_headers(headers)
+            .timeout(Duration::from_secs(300))  // 5分钟总超时
+            .connect_timeout(Duration::from_secs(30))  // 30秒连接超时
+            .pool_idle_timeout(Duration::from_secs(90))  // 连接池空闲超时
+            .pool_max_idle_per_host(10)  // 每个主机最多10个空闲连接
+            .tcp_keepalive(Duration::from_secs(60))  // TCP keep-alive
             .build()?;
 
         let rate_limiter =
@@ -825,23 +830,17 @@ impl Pan123Client {
         let part_count = std::cmp::max(1, file_size.div_ceil(slice_size));
         let multipart = part_count > 1;
 
-        let mut file = File::open(file_path)?;
-        let mut buffer = vec![0u8; slice_size as usize];
-        let mut uploaded = 0u64;
-
-        let mut chunks = Vec::new();
-        for part_number in 1..=part_count {
-            let read_len = file.read(&mut buffer)?;
-            chunks.push((part_number, buffer[..read_len].to_vec()));
-        }
+        let file_path_arc = Arc::new(file_path.to_path_buf());
+        let part_queue = Arc::new(Mutex::new((1u64..=part_count).collect::<Vec<_>>()));
+        let uploaded = Arc::new(Mutex::new(0u64));
 
         let chunk_parallelism = parallelism.min(part_count as usize).max(1);
-        let chunks_arc = Arc::new(Mutex::new(chunks));
         let (tx, rx) = mpsc::channel();
         let mut handles = Vec::new();
 
         for _ in 0..chunk_parallelism {
-            let chunks = Arc::clone(&chunks_arc);
+            let part_queue = Arc::clone(&part_queue);
+            let uploaded_counter = Arc::clone(&uploaded);
             let tx = tx.clone();
             let client = self.clone();
             let bucket = bucket.clone();
@@ -850,15 +849,45 @@ impl Pan123Client {
             let storage_node = storage_node.clone();
             let progress = progress.clone();
             let transfer_id = transfer_id.to_string();
+            let file_path_clone = Arc::clone(&file_path_arc);
 
-            let handle = thread::spawn(move || {
-                loop {
-                    let next = {
-                        let mut guard = chunks.lock().expect("chunk queue lock poisoned");
+            let handle = thread::Builder::new()
+                .stack_size(4 * 1024 * 1024)
+                .spawn(move || {
+                    let _uploaded = uploaded_counter; // Keep reference alive for potential future use
+                    loop {
+                    let part_number = {
+                        let mut guard = part_queue.lock().expect("part queue lock poisoned");
                         guard.pop()
                     };
-                    let Some((part_number, chunk)) = next else {
+                    let Some(part_number) = part_number else {
                         break;
+                    };
+
+                    let mut file = match File::open(file_path_clone.as_ref()) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            let _ = tx.send((part_number, Err(e.into())));
+                            break;
+                        }
+                    };
+
+                    let offset = (part_number - 1) * slice_size;
+                    if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)) {
+                        let _ = tx.send((part_number, Err(e.into())));
+                        break;
+                    }
+
+                    let mut chunk = Vec::with_capacity(slice_size as usize);
+                    let _read_len = match file
+                        .take(slice_size)
+                        .read_to_end(&mut chunk)
+                    {
+                        Ok(len) => len,
+                        Err(e) => {
+                            let _ = tx.send((part_number, Err(e.into())));
+                            break;
+                        }
                     };
 
                     let auth_url = if multipart {
@@ -879,6 +908,7 @@ impl Pan123Client {
                         "StorageNode": storage_node
                     });
 
+                    let chunk_len = chunk.len();
                     let result = client.retry_with_backoff_emit(
                         retry,
                         &transfer_id,
@@ -903,11 +933,11 @@ impl Pan123Client {
                             client
                                 .client
                                 .put(&put_url)
-                                .header("Content-Length", chunk.len().to_string())
+                                .header("Content-Length", chunk_len.to_string())
                                 .body(chunk.clone())
                                 .send()?
                                 .error_for_status()?;
-                            Ok(chunk.len() as u64)
+                            Ok(chunk_len as u64)
                         },
                     );
 
@@ -915,7 +945,8 @@ impl Pan123Client {
                         break;
                     }
                 }
-            });
+            })
+            .map_err(|e| Pan123Error::Operation(format!("failed to spawn upload thread: {}", e)))?;
             handles.push(handle);
         }
         drop(tx);
@@ -923,13 +954,17 @@ impl Pan123Client {
         for (part_number, result) in rx {
             match result {
                 Ok(bytes) => {
-                    uploaded += bytes;
+                    let current_uploaded = {
+                        let mut guard = uploaded.lock().expect("uploaded counter lock poisoned");
+                        *guard += bytes;
+                        *guard
+                    };
                     self.emit(
                         &progress,
                         TransferEvent::Progress {
                             id: transfer_id.to_string(),
                             kind: TransferKind::Upload,
-                            bytes: uploaded,
+                            bytes: current_uploaded,
                             total_bytes: Some(file_size),
                         },
                     );
@@ -1072,27 +1107,30 @@ impl Pan123Client {
             let tx = tx.clone();
             let client = self.clone();
             let progress = progress.clone();
-            let handle = thread::spawn(move || {
-                loop {
-                    let next = {
-                        let mut guard = queue.lock().expect("upload queue lock poisoned");
-                        guard.pop()
-                    };
-                    let Some((path, remote_parent)) = next else {
-                        break;
-                    };
-                    let result = client.upload_file_with(
-                        &path,
-                        remote_parent,
-                        duplicate,
-                        options,
-                        progress.clone(),
-                    );
-                    if tx.send((path, result)).is_err() {
-                        break;
+            let handle = thread::Builder::new()
+                .stack_size(4 * 1024 * 1024)
+                .spawn(move || {
+                    loop {
+                        let next = {
+                            let mut guard = queue.lock().expect("upload queue lock poisoned");
+                            guard.pop()
+                        };
+                        let Some((path, remote_parent)) = next else {
+                            break;
+                        };
+                        let result = client.upload_file_with(
+                            &path,
+                            remote_parent,
+                            duplicate,
+                            options,
+                            progress.clone(),
+                        );
+                        if tx.send((path, result)).is_err() {
+                            break;
+                        }
                     }
-                }
-            });
+                })
+                .map_err(|e| Pan123Error::Operation(format!("failed to spawn directory upload thread: {}", e)))?;
             handles.push(handle);
         }
         drop(tx);
@@ -1339,8 +1377,26 @@ impl Pan123Client {
     }
 
     fn decode_json<T: DeserializeOwned>(response: Response) -> Result<T> {
+        let status = response.status();
+        let url = response.url().to_string();
         let response = response.error_for_status()?;
-        Ok(response.json()?)
+
+        // 先获取响应文本，以便在解析失败时提供更多信息
+        let text = response.text()?;
+
+        serde_json::from_str(&text).map_err(|e| {
+            // 截取前500字符用于调试
+            let preview = if text.len() > 500 {
+                format!("{}...", &text[..500])
+            } else {
+                text.clone()
+            };
+
+            Pan123Error::Operation(format!(
+                "failed to parse JSON response from {}: {}. Response (status {}): {}",
+                url, e, status, preview
+            ))
+        })
     }
 
     fn unwrap_data<T>(&self, envelope: ApiEnvelope<T>) -> Result<T> {

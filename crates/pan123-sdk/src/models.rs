@@ -1,7 +1,20 @@
-﻿use serde::{Deserialize, Serialize};
+﻿use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::fmt;
 use std::path::PathBuf;
+
+fn deserialize_string_or_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    match Value::deserialize(deserializer)? {
+        Value::String(s) => s.parse::<u64>().map(Some).map_err(Error::custom),
+        Value::Number(n) => Ok(n.as_u64()),
+        Value::Null => Ok(None),
+        _ => Err(Error::custom("expected string or number")),
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenStore {
@@ -158,7 +171,7 @@ pub struct UploadRequestData {
     pub storage_node: Option<String>,
     #[serde(rename = "FileId")]
     pub file_id: Option<u64>,
-    #[serde(rename = "SliceSize")]
+    #[serde(rename = "SliceSize", deserialize_with = "deserialize_string_or_u64")]
     pub slice_size: Option<u64>,
 }
 

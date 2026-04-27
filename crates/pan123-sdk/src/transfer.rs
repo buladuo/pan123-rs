@@ -76,9 +76,7 @@ pub struct TransferOptions {
 impl Default for TransferOptions {
     fn default() -> Self {
         Self {
-            parallelism: std::thread::available_parallelism()
-                .map(|n| n.get().min(4))
-                .unwrap_or(3),
+            parallelism: 1,  // Web端不支持并发，使用顺序上传
             retry: RetryPolicy::default(),
         }
     }
