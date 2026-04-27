@@ -8,10 +8,11 @@ use std::time::Duration;
 
 use md5::Context;
 use qrcode::QrCode;
-use qrcode::render::unicode;
 use rand::Rng;
 use reqwest::blocking::{Client, Response};
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::{
+    ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderMap, HeaderValue, USER_AGENT,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -35,6 +36,7 @@ use crate::transfer::{
 
 const DEFAULT_BASE_URL: &str = "https://www.123pan.com/api";
 const DEFAULT_UCENTER_URL: &str = "https://login.123pan.com";
+const UPLOAD_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub enum TokenCheckStatus {
@@ -75,6 +77,7 @@ impl Pan123Client {
             "Accept-Language",
             HeaderValue::from_static("zh-CN,zh;q=0.9,en;q=0.8"),
         );
+        headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
         headers.insert("App-Version", HeaderValue::from_static("3"));
         headers.insert("Origin", HeaderValue::from_static("https://www.123pan.com"));
         headers.insert(
@@ -300,21 +303,36 @@ impl Pan123Client {
 
     pub fn create_folder(&self, folder_name: &str, parent_id: u64) -> Result<FileInfo> {
         let url = format!("{}/b/api/file/upload_request", self.domain());
-        let payload = json!({
+        let mut payload = json!({
             "driveId": 0,
             "etag": "",
             "fileName": folder_name,
             "parentFileId": parent_id,
             "size": 0,
             "type": 1,
-            "duplicate": 1,
             "NotReuse": true,
             "RequestSource": Value::Null
         });
-        let res: ApiEnvelope<Value> = self.send_json(
-            self.client.post(url).query(&self.dynamic_params()),
-            Some(payload),
-        )?;
+        let retry_id = format!("mkdir:{parent_id}:{folder_name}");
+        let mut res: ApiEnvelope<Value> =
+            self.retry_with_backoff(RetryPolicy::default(), &retry_id, |_, _| {
+                self.send_json(
+                    self.client.post(&url).query(&self.dynamic_params()),
+                    Some(payload.clone()),
+                )
+            })?;
+        if res.code == 5060 {
+            if let Some(existing) = self.find_child_folder_by_name(parent_id, folder_name)? {
+                return Ok(existing);
+            }
+            payload["duplicate"] = json!(1);
+            res = self.retry_with_backoff(RetryPolicy::default(), &retry_id, |_, _| {
+                self.send_json(
+                    self.client.post(&url).query(&self.dynamic_params()),
+                    Some(payload.clone()),
+                )
+            })?;
+        }
         let data = self.unwrap_data(res)?;
         let info = data.get("Info").ok_or_else(|| {
             Pan123Error::Operation("folder info missing from create response".into())
@@ -679,6 +697,10 @@ impl Pan123Client {
         let file_path = file_path.as_ref().to_path_buf();
         let transfer_id = format!("upload:{}", file_path.display());
         let total_bytes = fs::metadata(&file_path)?.len();
+        let file_retry = RetryPolicy {
+            max_attempts: options.transfer.retry.max_attempts.clamp(1, 3),
+            ..options.transfer.retry
+        };
         self.emit(
             &progress,
             TransferEvent::Started {
@@ -689,15 +711,53 @@ impl Pan123Client {
             },
         );
 
-        let result = self.upload_file_inner(
-            &file_path,
-            parent_id,
-            duplicate,
-            options.transfer.retry,
-            progress.clone(),
-            &transfer_id,
-            options.transfer.parallelism,
-        );
+        let mut result = None;
+        for attempt in 1..=file_retry.max_attempts {
+            match self.upload_file_inner(
+                &file_path,
+                parent_id,
+                duplicate,
+                options.transfer.retry,
+                progress.clone(),
+                &transfer_id,
+                options.transfer.parallelism,
+            ) {
+                Ok(file) => {
+                    result = Some(Ok(file));
+                    break;
+                }
+                Err(err) => {
+                    if attempt == file_retry.max_attempts || !Self::is_retryable_error(&err) {
+                        result = Some(Err(err));
+                        break;
+                    }
+
+                    self.emit(
+                        &progress,
+                        TransferEvent::Retrying {
+                            id: transfer_id.clone(),
+                            kind: TransferKind::Upload,
+                            attempt,
+                            message: format!("文件上传失败，准备重试: {err}"),
+                        },
+                    );
+                    self.emit(
+                        &progress,
+                        TransferEvent::Progress {
+                            id: transfer_id.clone(),
+                            kind: TransferKind::Upload,
+                            bytes: 0,
+                            total_bytes: Some(total_bytes),
+                        },
+                    );
+                    let backoff = file_retry.calculate_delay(attempt);
+                    thread::sleep(Duration::from_millis(backoff));
+                }
+            }
+        }
+
+        let result =
+            result.unwrap_or_else(|| Err(Pan123Error::Operation("upload retry failed".into())));
         match result {
             Ok(file) => {
                 self.emit(
@@ -851,71 +911,78 @@ impl Pan123Client {
             let progress = progress.clone();
             let transfer_id = transfer_id.to_string();
 
-            let handle = thread::spawn(move || {
-                loop {
-                    let next = {
-                        let mut guard = chunks.lock().expect("chunk queue lock poisoned");
-                        guard.pop()
-                    };
-                    let Some((part_number, chunk)) = next else {
-                        break;
-                    };
+            let handle = thread::Builder::new()
+                .name("pan123-upload-chunk".into())
+                .stack_size(UPLOAD_WORKER_STACK_SIZE)
+                .spawn(move || {
+                    loop {
+                        let next = {
+                            let mut guard = chunks.lock().expect("chunk queue lock poisoned");
+                            guard.pop()
+                        };
+                        let Some((part_number, chunk)) = next else {
+                            break;
+                        };
 
-                    let auth_url = if multipart {
-                        format!(
-                            "{}/b/api/file/s3_repare_upload_parts_batch",
-                            client.domain()
-                        )
-                    } else {
-                        format!("{}/b/api/file/s3_upload_object/auth", client.domain())
-                    };
+                        let auth_url = if multipart {
+                            format!(
+                                "{}/b/api/file/s3_repare_upload_parts_batch",
+                                client.domain()
+                            )
+                        } else {
+                            format!("{}/b/api/file/s3_upload_object/auth", client.domain())
+                        };
 
-                    let auth_payload = json!({
-                        "bucket": bucket,
-                        "key": key,
-                        "partNumberStart": part_number,
-                        "partNumberEnd": part_number + 1,
-                        "uploadId": upload_id,
-                        "StorageNode": storage_node
-                    });
+                        let auth_payload = json!({
+                            "bucket": bucket,
+                            "key": key,
+                            "partNumberStart": part_number,
+                            "partNumberEnd": part_number + 1,
+                            "uploadId": upload_id,
+                            "StorageNode": storage_node
+                        });
 
-                    let result = client.retry_with_backoff_emit(
-                        retry,
-                        &transfer_id,
-                        TransferKind::Upload,
-                        &progress,
-                        |_, _| {
-                            let auth_res: ApiEnvelope<PresignedUrlsData> = client.send_json(
+                        let result = client.retry_with_backoff_emit(
+                            retry,
+                            &transfer_id,
+                            TransferKind::Upload,
+                            &progress,
+                            |_, _| {
+                                let auth_res: ApiEnvelope<PresignedUrlsData> = client.send_json(
+                                    client
+                                        .client
+                                        .post(&auth_url)
+                                        .query(&client.dynamic_params()),
+                                    Some(auth_payload.clone()),
+                                )?;
+                                let mut pre_signed = client.unwrap_data(auth_res)?.presigned_urls;
+                                let put_url = pre_signed
+                                    .remove(&part_number.to_string())
+                                    .ok_or_else(|| {
+                                        Pan123Error::Operation(format!(
+                                            "missing pre-signed url for part {part_number}"
+                                        ))
+                                    })?;
+
                                 client
                                     .client
-                                    .post(&auth_url)
-                                    .query(&client.dynamic_params()),
-                                Some(auth_payload.clone()),
-                            )?;
-                            let mut pre_signed = client.unwrap_data(auth_res)?.presigned_urls;
-                            let put_url =
-                                pre_signed.remove(&part_number.to_string()).ok_or_else(|| {
-                                    Pan123Error::Operation(format!(
-                                        "missing pre-signed url for part {part_number}"
-                                    ))
-                                })?;
+                                    .put(&put_url)
+                                    .header("Content-Length", chunk.len().to_string())
+                                    .body(chunk.clone())
+                                    .send()?
+                                    .error_for_status()?;
+                                Ok(chunk.len() as u64)
+                            },
+                        );
 
-                            client
-                                .client
-                                .put(&put_url)
-                                .header("Content-Length", chunk.len().to_string())
-                                .body(chunk.clone())
-                                .send()?
-                                .error_for_status()?;
-                            Ok(chunk.len() as u64)
-                        },
-                    );
-
-                    if tx.send((part_number, result)).is_err() {
-                        break;
+                        if tx.send((part_number, result)).is_err() {
+                            break;
+                        }
                     }
-                }
-            });
+                })
+                .map_err(|err| {
+                    Pan123Error::Operation(format!("failed to spawn upload chunk worker: {err}"))
+                })?;
             handles.push(handle);
         }
         drop(tx);
@@ -1026,24 +1093,31 @@ impl Pan123Client {
         if !local_dir.is_dir() {
             return Err(Pan123Error::InvalidPath(local_dir.display().to_string()));
         }
+        let local_dir = local_dir.canonicalize()?;
 
         let root_name = local_dir
             .file_name()
             .and_then(|value| value.to_str())
             .ok_or_else(|| Pan123Error::InvalidPath(local_dir.display().to_string()))?;
-        let root_remote = self.create_folder(root_name, parent_id)?;
-        let mut mapping = HashMap::from([(local_dir.canonicalize()?, root_remote.file_id)]);
+        let root_remote = self
+            .find_child_folder_by_name(parent_id, root_name)?
+            .unwrap_or(self.create_folder(root_name, parent_id)?);
+        let mut mapping = HashMap::from([(PathBuf::new(), root_remote.file_id)]);
         let mut upload_tasks = Vec::<(PathBuf, u64)>::new();
 
-        for entry in WalkDir::new(local_dir)
+        for entry in WalkDir::new(&local_dir)
             .min_depth(1)
             .into_iter()
             .filter_map(|entry| entry.ok())
         {
-            let path = entry.path().canonicalize()?;
-            let parent = path
+            let path = entry.path().to_path_buf();
+            let relative_path = path
+                .strip_prefix(&local_dir)
+                .map_err(|_| Pan123Error::InvalidPath(path.display().to_string()))?
+                .to_path_buf();
+            let parent = relative_path
                 .parent()
-                .ok_or_else(|| Pan123Error::InvalidPath(path.display().to_string()))?
+                .unwrap_or_else(|| Path::new(""))
                 .to_path_buf();
             let remote_parent = *mapping.get(&parent).ok_or_else(|| {
                 Pan123Error::Operation(format!("missing remote parent for {}", path.display()))
@@ -1051,8 +1125,10 @@ impl Pan123Client {
 
             if entry.file_type().is_dir() {
                 let folder_name = entry.file_name().to_string_lossy().to_string();
-                let remote = self.create_folder(&folder_name, remote_parent)?;
-                mapping.insert(path, remote.file_id);
+                let remote = self
+                    .find_child_folder_by_name(remote_parent, &folder_name)?
+                    .unwrap_or(self.create_folder(&folder_name, remote_parent)?);
+                mapping.insert(relative_path, remote.file_id);
             } else if entry.file_type().is_file() {
                 upload_tasks.push((path, remote_parent));
             }
@@ -1072,27 +1148,35 @@ impl Pan123Client {
             let tx = tx.clone();
             let client = self.clone();
             let progress = progress.clone();
-            let handle = thread::spawn(move || {
-                loop {
-                    let next = {
-                        let mut guard = queue.lock().expect("upload queue lock poisoned");
-                        guard.pop()
-                    };
-                    let Some((path, remote_parent)) = next else {
-                        break;
-                    };
-                    let result = client.upload_file_with(
-                        &path,
-                        remote_parent,
-                        duplicate,
-                        options,
-                        progress.clone(),
-                    );
-                    if tx.send((path, result)).is_err() {
-                        break;
+            let handle = thread::Builder::new()
+                .name("pan123-upload-dir".into())
+                .stack_size(UPLOAD_WORKER_STACK_SIZE)
+                .spawn(move || {
+                    loop {
+                        let next = {
+                            let mut guard = queue.lock().expect("upload queue lock poisoned");
+                            guard.pop()
+                        };
+                        let Some((path, remote_parent)) = next else {
+                            break;
+                        };
+                        let result = client.upload_file_with(
+                            &path,
+                            remote_parent,
+                            duplicate,
+                            options,
+                            progress.clone(),
+                        );
+                        if tx.send((path, result)).is_err() {
+                            break;
+                        }
                     }
-                }
-            });
+                })
+                .map_err(|err| {
+                    Pan123Error::Operation(format!(
+                        "failed to spawn directory upload worker: {err}"
+                    ))
+                })?;
             handles.push(handle);
         }
         drop(tx);
@@ -1175,8 +1259,23 @@ impl Pan123Client {
     fn print_qr_code(&self, content: &str) -> Result<()> {
         let code = QrCode::new(content.as_bytes())
             .map_err(|err| Pan123Error::Operation(err.to_string()))?;
-        let image = code.render::<unicode::Dense1x2>().quiet_zone(false).build();
-        println!("请使用 123pan App 或微信扫码登录：\n{image}\n{content}");
+        let width = code.width();
+        let margin = 2usize;
+        println!("请使用 123pan App 或微信扫码登录：");
+        for y in 0..(width + margin * 2) {
+            let mut line = String::with_capacity((width + margin * 2) * 2);
+            for x in 0..(width + margin * 2) {
+                let dark = if x < margin || y < margin || x >= width + margin || y >= width + margin
+                {
+                    false
+                } else {
+                    code[(x - margin, y - margin)] == qrcode::types::Color::Dark
+                };
+                line.push_str(if dark { "██" } else { "  " });
+            }
+            println!("{line}");
+        }
+        println!("\n登录链接（扫码失败时可备用）：\n{content}");
         Ok(())
     }
 
@@ -1340,7 +1439,19 @@ impl Pan123Client {
 
     fn decode_json<T: DeserializeOwned>(response: Response) -> Result<T> {
         let response = response.error_for_status()?;
-        Ok(response.json()?)
+        let url = response.url().to_string();
+        let status = response.status();
+        let body = response.text().map_err(|err| {
+            Pan123Error::Operation(format!(
+                "failed to read response body from {url} ({status}): {err}"
+            ))
+        })?;
+        serde_json::from_str(&body).map_err(|err| {
+            let snippet = body.chars().take(240).collect::<String>();
+            Pan123Error::Operation(format!(
+                "failed to parse json from {url} ({status}): {err}; body: {snippet}"
+            ))
+        })
     }
 
     fn unwrap_data<T>(&self, envelope: ApiEnvelope<T>) -> Result<T> {
