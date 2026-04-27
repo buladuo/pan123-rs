@@ -61,10 +61,11 @@ pub enum Pan123Error {
 
 impl Pan123Error {
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Pan123Error::Io { .. } | Pan123Error::Http { .. } | Pan123Error::Timeout { .. }
-        )
+        match self {
+            Pan123Error::Io { .. } | Pan123Error::Http { .. } | Pan123Error::Timeout { .. } => true,
+            Pan123Error::Operation(message) => Self::is_retryable_operation(message),
+            _ => false,
+        }
     }
 
     pub fn is_auth_error(&self) -> bool {
@@ -85,5 +86,24 @@ impl Pan123Error {
             }
             other => other,
         }
+    }
+
+    fn is_retryable_operation(message: &str) -> bool {
+        let text = message.to_ascii_lowercase();
+        [
+            "upload verification timed out",
+            "timeout",
+            "timed out",
+            "network",
+            "connect",
+            "connection reset",
+            "connection refused",
+            "broken pipe",
+            "unexpected eof",
+            "failed to read response body",
+            "failed to parse json",
+        ]
+        .iter()
+        .any(|pattern| text.contains(pattern))
     }
 }
