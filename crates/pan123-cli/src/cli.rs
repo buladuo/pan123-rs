@@ -1652,26 +1652,34 @@ fn extract_token(line: &str, pos: usize) -> (usize, String) {
 
     // 检查是否在引号内
     let mut in_quote = false;
-    let mut start = 0;
+    let mut quote_start = 0;
+    let mut token_start = 0;
 
     for (i, ch) in prefix.char_indices() {
         if ch == '"' {
             in_quote = !in_quote;
             if in_quote {
-                // 进入引号，记录起始位置（引号后）
-                start = i + 1;
+                // 进入引号，记录引号位置
+                quote_start = i;
+                token_start = i; // 从引号开始，因为补全需要替换整个带引号的部分
             }
         } else if ch.is_whitespace() && !in_quote {
             // 空格且不在引号内，更新起始位置
-            start = i + 1;
+            token_start = i + 1;
+            quote_start = i + 1;
         }
     }
 
-    // 提取 token，去掉引号
-    let token = prefix[start..].to_string();
-    let token = token.trim_start_matches('"').to_string();
+    // 提取 token
+    let token = if in_quote {
+        // 在引号内，去掉引号提取内容
+        prefix[quote_start + 1..].to_string()
+    } else {
+        // 不在引号内，直接提取
+        prefix[token_start..].to_string()
+    };
 
-    (start, token)
+    (token_start, token)
 }
 
 fn split_line_tokens(line: &str) -> Vec<String> {
