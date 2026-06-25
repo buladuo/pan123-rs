@@ -703,15 +703,9 @@ impl Pan123Client {
         let file_path = file_path.as_ref().to_path_buf();
         let transfer_id = format!("upload:{}", file_path.display());
         let total_bytes = fs::metadata(&file_path)?.len();
-        self.emit(
-            &progress,
-            TransferEvent::Started {
-                id: transfer_id.clone(),
-                kind: TransferKind::Upload,
-                path: file_path.clone(),
-                total_bytes: Some(total_bytes),
-            },
-        );
+
+        // Started 事件会在 upload_file_inner 中 MD5 计算完成后发送
+        // 避免进度条在 MD5 计算期间频繁刷新
 
         let result = self.upload_file_inner(
             &file_path,
@@ -779,6 +773,17 @@ impl Pan123Client {
         }
 
         let md5_hash = self.calculate_file_md5(file_path)?;
+
+        // MD5 计算完成后，发送 Started 事件，开始显示上传进度条
+        self.emit(
+            &progress,
+            TransferEvent::Started {
+                id: transfer_id.to_string(),
+                kind: TransferKind::Upload,
+                path: file_path.to_path_buf(),
+                total_bytes: Some(file_size),
+            },
+        );
 
         let request_url = format!("{}/b/api/file/upload_request", self.domain());
         let mut payload = json!({
