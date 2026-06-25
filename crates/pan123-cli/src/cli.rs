@@ -823,7 +823,31 @@ impl Pan123Cli {
 
     fn find_child_by_name(&self, parent_id: u64, name: &str) -> Result<Option<FileInfo>> {
         let items = self.client()?.get_file_list(parent_id, 1, 500)?;
-        Ok(items.into_iter().find(|item| item.file_name == name))
+
+        // 先尝试精确匹配
+        if let Some(item) = items.iter().find(|item| item.file_name == name) {
+            return Ok(Some(item.clone()));
+        }
+
+        // 如果精确匹配失败，尝试前缀匹配（支持不完整的文件名）
+        let matches: Vec<_> = items
+            .iter()
+            .filter(|item| item.file_name.starts_with(name))
+            .collect();
+
+        match matches.len() {
+            0 => Ok(None),
+            1 => Ok(Some(matches[0].clone())),
+            _ => {
+                // 多个匹配，提示用户
+                eprintln!("{}，找到 {} 个匹配:", "文件名不明确".yellow(), matches.len());
+                for item in &matches {
+                    eprintln!("  - {} (ID: {})", item.file_name, item.file_id);
+                }
+                eprintln!("请使用完整文件名或文件 ID");
+                Ok(None)
+            }
+        }
     }
 
     fn path_from_file_id(&self, file_id: u64) -> Result<String> {
@@ -1610,7 +1634,13 @@ fn build_completion_replacement(base_prefix: &str, name: &str, is_dir: bool) -> 
     if is_dir {
         value.push('/');
     }
-    value
+
+    // 如果文件名包含空格或特殊字符，添加引号
+    if name.contains(' ') || name.contains('(') || name.contains(')') || name.contains('&') {
+        format!("\"{}\"", value)
+    } else {
+        value
+    }
 }
 
 fn extract_token(line: &str, pos: usize) -> (usize, String) {
