@@ -30,7 +30,7 @@ use crate::models::{
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::transfer::{
     DownloadOptions, ProgressCallback, RetryPolicy, TransferEvent, TransferFailure, TransferKind,
-    UploadDirectoryReport, UploadFailureKind, UploadOptions,
+    TransferOptions, UploadDirectoryReport, UploadFailureKind, UploadOptions,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.123278.com";
@@ -664,11 +664,30 @@ impl Pan123Client {
         parent_id: u64,
         duplicate: DuplicateMode,
     ) -> Result<FileInfo> {
+        let file_path_ref = file_path.as_ref();
+        let file_size = fs::metadata(file_path_ref)?.len();
+
+        // 根据文件大小选择重试策略
+        // 大于 1GB 的文件使用非常激进的重试策略
+        let retry_policy = if file_size > 1024 * 1024 * 1024 {
+            RetryPolicy::very_aggressive()
+        } else if file_size > 100 * 1024 * 1024 {
+            // 大于 100MB 使用激进策略
+            RetryPolicy::aggressive()
+        } else {
+            RetryPolicy::default()
+        };
+
         self.upload_file_with(
             file_path,
             parent_id,
             duplicate,
-            UploadOptions::default(),
+            UploadOptions {
+                transfer: TransferOptions {
+                    retry: retry_policy,
+                    ..Default::default()
+                },
+            },
             None,
         )
     }
@@ -930,10 +949,16 @@ impl Pan123Client {
                                     ))
                                 })?;
 
+                            // 为大分片使用更长的超时时间
+                            // 假设最低速度 1MB/s，给予 2 倍缓冲时间
+                            let chunk_mb = chunk_len / (1024 * 1024).max(1);
+                            let timeout_secs = (chunk_mb * 2).max(300); // 至少 5 分钟，最多根据分片大小调整
+
                             client
                                 .client
                                 .put(&put_url)
                                 .header("Content-Length", chunk_len.to_string())
+                                .timeout(Duration::from_secs(timeout_secs as u64))
                                 .body(chunk.clone())
                                 .send()?
                                 .error_for_status()?;

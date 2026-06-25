@@ -36,6 +36,16 @@ impl RetryPolicy {
         }
     }
 
+    pub fn very_aggressive() -> Self {
+        Self {
+            max_attempts: 10,
+            base_delay_ms: 1000,
+            max_delay_ms: 120_000,
+            exponential_backoff: true,
+            jitter: true,
+        }
+    }
+
     pub fn conservative() -> Self {
         Self {
             max_attempts: 2,
