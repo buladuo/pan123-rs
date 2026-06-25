@@ -3,17 +3,35 @@ use serde_json::Value;
 use std::fmt;
 use std::path::PathBuf;
 
-fn deserialize_string_or_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+fn deserialize_option_u64_from_any<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    use serde::de::Error;
-    match Value::deserialize(deserializer)? {
-        Value::String(s) => s.parse::<u64>().map(Some).map_err(Error::custom),
-        Value::Number(n) => Ok(n.as_u64()),
-        Value::Null => Ok(None),
-        _ => Err(Error::custom("expected string or number")),
+    let value = Option::<Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| serde::de::Error::custom("expected u64-compatible number")),
+        Some(Value::String(text)) if text.is_empty() => Ok(None),
+        Some(Value::String(text)) => text
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|err| serde::de::Error::custom(err.to_string())),
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "expected string or number for u64, got {other}"
+        ))),
     }
+}
+
+fn deserialize_vec_or_default<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    let value = Option::<Vec<T>>::deserialize(deserializer)?;
+    Ok(value.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,13 +108,21 @@ impl FileInfo {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct FileInfoListData {
-    #[serde(rename = "infoList", default)]
+    #[serde(
+        rename = "infoList",
+        default,
+        deserialize_with = "deserialize_vec_or_default"
+    )]
     pub info_list: Vec<FileInfo>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct FileListData {
-    #[serde(rename = "InfoList", default)]
+    #[serde(
+        rename = "InfoList",
+        default,
+        deserialize_with = "deserialize_vec_or_default"
+    )]
     pub info_list: Vec<FileInfo>,
 }
 
@@ -169,9 +195,15 @@ pub struct UploadRequestData {
     pub key: Option<String>,
     #[serde(rename = "StorageNode")]
     pub storage_node: Option<String>,
-    #[serde(rename = "FileId")]
+    #[serde(
+        rename = "FileId",
+        deserialize_with = "deserialize_option_u64_from_any"
+    )]
     pub file_id: Option<u64>,
-    #[serde(rename = "SliceSize", deserialize_with = "deserialize_string_or_u64")]
+    #[serde(
+        rename = "SliceSize",
+        deserialize_with = "deserialize_option_u64_from_any"
+    )]
     pub slice_size: Option<u64>,
 }
 
