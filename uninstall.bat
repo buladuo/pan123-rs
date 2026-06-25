@@ -5,86 +5,87 @@ set BINARY_NAME=pan123.exe
 set INSTALL_DIR=%ProgramFiles%\pan123
 
 echo ========================================
-echo   pan123-rs å¸è½½ç¨‹åº
+echo   pan123-rs Ğ¶ÔØ³ÌĞò
 echo ========================================
 echo.
 
-:: æ£€æŸ¥ç®¡ç†å‘˜æƒé™
+:: ¼ì²é¹ÜÀíÔ±È¨ÏŞ
 net session >nul 2>&1
 if errorlevel 1 (
-    echo é”™è¯¯: éœ€è¦ç®¡ç†å‘˜æƒé™
-    echo è¯·å³é”®ç‚¹å‡»æ­¤è„šæœ¬ï¼Œé€‰æ‹©"ä»¥ç®¡ç†å‘˜èº«ä»½è¿è¡Œ"
+    echo ´íÎó: ĞèÒª¹ÜÀíÔ±È¨ÏŞ
+    echo ÇëÓÒ¼üµã»÷´Ë½Å±¾£¬Ñ¡Ôñ"ÒÔ¹ÜÀíÔ±Éí·İÔËĞĞ"
     echo.
     pause
     exit /b 1
 )
 
-:: æ£€æŸ¥æ˜¯å¦å·²å®‰è£…
+:: ¼ì²éÊÇ·ñÒÑ°²×°
 if not exist "%INSTALL_DIR%\%BINARY_NAME%" (
-    echo æœªæ‰¾åˆ°å·²å®‰è£…çš„ %BINARY_NAME%
-    echo å®‰è£…ä½ç½®: %INSTALL_DIR%
+    echo Î´ÕÒµ½ÒÑ°²×°µÄ %BINARY_NAME%
+    echo °²×°Î»ÖÃ: %INSTALL_DIR%
     echo.
     pause
     exit /b 0
 )
 
-:: è·å–å½“å‰ç‰ˆæœ¬
+:: »ñÈ¡µ±Ç°°æ±¾
 for /f "tokens=*" %%i in ('"%INSTALL_DIR%\%BINARY_NAME%" --version 2^>nul') do set CURRENT_VERSION=%%i
-echo æ£€æµ‹åˆ°å®‰è£…ç‰ˆæœ¬: !CURRENT_VERSION!
-echo å®‰è£…ä½ç½®: %INSTALL_DIR%
+echo ¼ì²âµ½°²×°°æ±¾: !CURRENT_VERSION!
+echo °²×°Î»ÖÃ: %INSTALL_DIR%
 echo.
 
-set /p CONFIRM="ç¡®è®¤å¸è½½? (Y/N): "
+set /p CONFIRM="È·ÈÏĞ¶ÔØ? (Y/N): "
 if /i not "%CONFIRM%"=="Y" (
-    echo å·²å–æ¶ˆå¸è½½
+    echo ÒÑÈ¡ÏûĞ¶ÔØ
     pause
     exit /b 0
 )
 
 echo.
-echo æ­£åœ¨å¸è½½...
+echo ÕıÔÚĞ¶ÔØ...
 
-:: å°è¯•åœæ­¢æ­£åœ¨è¿è¡Œçš„è¿›ç¨‹
+:: ³¢ÊÔÍ£Ö¹ÕıÔÚÔËĞĞµÄ½ø³Ì
 tasklist | find /i "%BINARY_NAME%" >nul
 if not errorlevel 1 (
-    echo æ£€æµ‹åˆ° %BINARY_NAME% æ­£åœ¨è¿è¡Œï¼Œå°è¯•ç»“æŸè¿›ç¨‹...
+    echo ¼ì²âµ½ %BINARY_NAME% ÕıÔÚÔËĞĞ£¬³¢ÊÔ½áÊø½ø³Ì...
     taskkill /F /IM "%BINARY_NAME%" >nul 2>&1
     timeout /t 2 >nul
 )
 
-:: åˆ é™¤æ–‡ä»¶
+:: É¾³ıÎÄ¼ş
 del /F /Q "%INSTALL_DIR%\%BINARY_NAME%" >nul 2>&1
 if errorlevel 1 (
-    echo é”™è¯¯: æ— æ³•åˆ é™¤æ–‡ä»¶ï¼Œå¯èƒ½è¢«å ç”¨
-    echo è¯·å…³é—­æ‰€æœ‰ pan123 è¿›ç¨‹åé‡è¯•
+    echo ´íÎó: ÎŞ·¨É¾³ıÎÄ¼ş£¬¿ÉÄÜ±»Õ¼ÓÃ
+    echo Çë¹Ø±ÕËùÓĞ pan123 ½ø³ÌºóÖØÊÔ
     pause
     exit /b 1
 )
 
 if exist "%INSTALL_DIR%\%BINARY_NAME%" (
-    echo é”™è¯¯: åˆ é™¤å¤±è´¥
+    echo ´íÎó: É¾³ıÊ§°Ü
     pause
     exit /b 1
 )
 
-echo âœ“ å·²åˆ é™¤ç¨‹åºæ–‡ä»¶
+echo ? ÒÑÉ¾³ı³ÌĞòÎÄ¼ş
 
-:: åˆ é™¤ç›®å½•ï¼ˆå¦‚æœä¸ºç©ºï¼‰
+:: É¾³ıÄ¿Â¼£¨Èç¹ûÎª¿Õ£©
 rmdir "%INSTALL_DIR%" 2>nul
 if not exist "%INSTALL_DIR%" (
-    echo âœ“ å·²åˆ é™¤å®‰è£…ç›®å½•
+    echo ? ÒÑÉ¾³ı°²×°Ä¿Â¼
 )
 
 echo.
 echo ========================================
-echo âœ“ å¸è½½å®Œæˆï¼
+echo ? Ğ¶ÔØÍê³É£¡
 echo ========================================
 echo.
-echo æ³¨æ„:
-echo 1. é…ç½®æ–‡ä»¶ä¿ç•™åœ¨: %%APPDATA%%\pan123\
-echo 2. PATH ç¯å¢ƒå˜é‡æœªè‡ªåŠ¨æ¸…ç†
-echo    å¦‚éœ€æ¸…ç†è¯·æ‰‹åŠ¨ä»ç³»ç»Ÿ PATH ä¸­åˆ é™¤: %INSTALL_DIR%
-echo 3. Windows å‡­æ®ç®¡ç†å™¨ä¸­çš„ç™»å½•ä¿¡æ¯æœªåˆ é™¤
-echo    å¦‚éœ€åˆ é™¤è¯·åœ¨"æ§åˆ¶é¢æ¿ ^> å‡­æ®ç®¡ç†å™¨"ä¸­æ‰‹åŠ¨åˆ é™¤
+echo ×¢Òâ:
+echo 1. ÅäÖÃÎÄ¼ş±£ÁôÔÚ: %%APPDATA%%\pan123\
+echo 2. PATH »·¾³±äÁ¿Î´×Ô¶¯ÇåÀí
+echo    ÈçĞèÇåÀíÇëÊÖ¶¯´ÓÏµÍ³ PATH ÖĞÉ¾³ı: %INSTALL_DIR%
+echo 3. Windows Æ¾¾İ¹ÜÀíÆ÷ÖĞµÄµÇÂ¼ĞÅÏ¢Î´É¾³ı
+echo    ÈçĞèÉ¾³ıÇëÔÚ"¿ØÖÆÃæ°å ^> Æ¾¾İ¹ÜÀíÆ÷"ÖĞÊÖ¶¯É¾³ı
 echo.
 pause
+
