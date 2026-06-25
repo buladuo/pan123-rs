@@ -81,26 +81,85 @@ if (Test-Path "LICENSE") {
 # 创建安装脚本
 $InstallScript = @'
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 
 set BINARY_NAME=pan123.exe
 set INSTALL_DIR=%ProgramFiles%\pan123
 
-echo 正在安装 %BINARY_NAME%...
+echo ========================================
+echo   pan123-rs 安装程序
+echo ========================================
+echo.
 
-:: 创建安装目录
-if not exist "%INSTALL_DIR%" (
-    mkdir "%INSTALL_DIR%"
-)
-
-:: 复制文件
-copy /Y "%BINARY_NAME%" "%INSTALL_DIR%\%BINARY_NAME%" >nul
+:: 检查管理员权限
+net session >nul 2>&1
 if errorlevel 1 (
-    echo 错误: 需要管理员权限来安装
+    echo 错误: 需要管理员权限
     echo 请右键点击此脚本，选择"以管理员身份运行"
+    echo.
     pause
     exit /b 1
 )
+
+:: 检查是否已安装
+if exist "%INSTALL_DIR%\%BINARY_NAME%" (
+    echo 检测到已安装的版本
+
+    :: 获取当前版本
+    "%INSTALL_DIR%\%BINARY_NAME%" --version >nul 2>&1
+    if not errorlevel 1 (
+        for /f "tokens=*" %%i in ('"%INSTALL_DIR%\%BINARY_NAME%" --version 2^>nul') do set CURRENT_VERSION=%%i
+        echo 当前版本: !CURRENT_VERSION!
+    )
+
+    echo.
+    echo 将卸载旧版本并安装新版本
+    echo.
+
+    :: 尝试停止正在运行的进程
+    tasklist | find /i "%BINARY_NAME%" >nul
+    if not errorlevel 1 (
+        echo 检测到 %BINARY_NAME% 正在运行，尝试结束进程...
+        taskkill /F /IM "%BINARY_NAME%" >nul 2>&1
+        timeout /t 2 >nul
+    )
+
+    :: 删除旧版本
+    echo 正在删除旧版本...
+    del /F /Q "%INSTALL_DIR%\%BINARY_NAME%" >nul 2>&1
+    if exist "%INSTALL_DIR%\%BINARY_NAME%" (
+        echo 警告: 无法删除旧版本，文件可能被占用
+        echo 请关闭所有 pan123 进程后重试
+        pause
+        exit /b 1
+    )
+    echo ✓ 旧版本已删除
+    echo.
+)
+
+:: 创建安装目录
+if not exist "%INSTALL_DIR%" (
+    echo 创建安装目录: %INSTALL_DIR%
+    mkdir "%INSTALL_DIR%"
+)
+
+:: 复制新文件
+echo 正在安装 %BINARY_NAME%...
+copy /Y "%BINARY_NAME%" "%INSTALL_DIR%\%BINARY_NAME%" >nul
+if errorlevel 1 (
+    echo 错误: 安装失败
+    pause
+    exit /b 1
+)
+
+:: 验证安装
+if not exist "%INSTALL_DIR%\%BINARY_NAME%" (
+    echo 错误: 安装验证失败
+    pause
+    exit /b 1
+)
+
+echo ✓ 文件已复制到 %INSTALL_DIR%
 
 :: 添加到 PATH
 set "PATH_TO_ADD=%INSTALL_DIR%"
@@ -108,21 +167,37 @@ for /f "skip=2 tokens=3*" %%a in ('reg query "HKLM\SYSTEM\CurrentControlSet\Cont
 
 echo %CURRENT_PATH% | find /i "%PATH_TO_ADD%" >nul
 if errorlevel 1 (
-    echo 添加到系统 PATH...
+    echo 正在添加到系统 PATH...
     setx /M PATH "%CURRENT_PATH%;%PATH_TO_ADD%" >nul
     if errorlevel 1 (
-        echo 警告: 无法自动添加到 PATH，请手动添加: %PATH_TO_ADD%
+        echo 警告: 无法自动添加到 PATH
+        echo 请手动添加到系统环境变量: %PATH_TO_ADD%
     ) else (
         echo ✓ 已添加到系统 PATH
     )
+) else (
+    echo ✓ 已存在于系统 PATH
 )
 
+:: 获取新版本
 echo.
+for /f "tokens=*" %%i in ('"%INSTALL_DIR%\%BINARY_NAME%" --version 2^>nul') do set NEW_VERSION=%%i
+
+echo.
+echo ========================================
 echo ✓ 安装完成！
+echo ========================================
 echo.
-echo 请重新打开命令提示符，然后运行:
-echo   pan123 --help     查看帮助信息
-echo   pan123 login      开始使用
+echo 安装版本: !NEW_VERSION!
+echo 安装位置: %INSTALL_DIR%
+echo.
+echo 请重新打开命令提示符或 PowerShell，然后运行:
+echo   pan123 --version    查看版本
+echo   pan123 --help       查看帮助信息
+echo   pan123 login        登录账号
+echo   pan123 shell        启动交互式 Shell
+echo.
+echo 卸载方法: 运行 uninstall.bat
 echo.
 pause
 '@
@@ -132,33 +207,93 @@ Set-Content -Path "$ReleaseDir\install.bat" -Value $InstallScript -Encoding ASCI
 # 创建卸载脚本
 $UninstallScript = @'
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 
 set BINARY_NAME=pan123.exe
 set INSTALL_DIR=%ProgramFiles%\pan123
 
-echo 正在卸载 %BINARY_NAME%...
+echo ========================================
+echo   pan123-rs 卸载程序
+echo ========================================
+echo.
 
-:: 删除文件
-if exist "%INSTALL_DIR%\%BINARY_NAME%" (
-    del /F /Q "%INSTALL_DIR%\%BINARY_NAME%" >nul
-    if errorlevel 1 (
-        echo 错误: 需要管理员权限来卸载
-        echo 请右键点击此脚本，选择"以管理员身份运行"
-        pause
-        exit /b 1
-    )
-
-    :: 删除目录
-    rmdir "%INSTALL_DIR%" 2>nul
-
-    echo ✓ 卸载完成！
+:: 检查管理员权限
+net session >nul 2>&1
+if errorlevel 1 (
+    echo 错误: 需要管理员权限
+    echo 请右键点击此脚本，选择"以管理员身份运行"
     echo.
-    echo 注意: PATH 环境变量未自动清理，如需清理请手动删除: %INSTALL_DIR%
-) else (
-    echo 未找到已安装的 %BINARY_NAME%
+    pause
+    exit /b 1
 )
 
+:: 检查是否已安装
+if not exist "%INSTALL_DIR%\%BINARY_NAME%" (
+    echo 未找到已安装的 %BINARY_NAME%
+    echo 安装位置: %INSTALL_DIR%
+    echo.
+    pause
+    exit /b 0
+)
+
+:: 获取当前版本
+for /f "tokens=*" %%i in ('"%INSTALL_DIR%\%BINARY_NAME%" --version 2^>nul') do set CURRENT_VERSION=%%i
+echo 检测到安装版本: !CURRENT_VERSION!
+echo 安装位置: %INSTALL_DIR%
+echo.
+
+set /p CONFIRM="确认卸载? (Y/N): "
+if /i not "%CONFIRM%"=="Y" (
+    echo 已取消卸载
+    pause
+    exit /b 0
+)
+
+echo.
+echo 正在卸载...
+
+:: 尝试停止正在运行的进程
+tasklist | find /i "%BINARY_NAME%" >nul
+if not errorlevel 1 (
+    echo 检测到 %BINARY_NAME% 正在运行，尝试结束进程...
+    taskkill /F /IM "%BINARY_NAME%" >nul 2>&1
+    timeout /t 2 >nul
+)
+
+:: 删除文件
+del /F /Q "%INSTALL_DIR%\%BINARY_NAME%" >nul 2>&1
+if errorlevel 1 (
+    echo 错误: 无法删除文件，可能被占用
+    echo 请关闭所有 pan123 进程后重试
+    pause
+    exit /b 1
+)
+
+if exist "%INSTALL_DIR%\%BINARY_NAME%" (
+    echo 错误: 删除失败
+    pause
+    exit /b 1
+)
+
+echo ✓ 已删除程序文件
+
+:: 删除目录（如果为空）
+rmdir "%INSTALL_DIR%" 2>nul
+if not exist "%INSTALL_DIR%" (
+    echo ✓ 已删除安装目录
+)
+
+echo.
+echo ========================================
+echo ✓ 卸载完成！
+echo ========================================
+echo.
+echo 注意:
+echo 1. 配置文件保留在: %%APPDATA%%\pan123\
+echo 2. PATH 环境变量未自动清理
+echo    如需清理请手动从系统 PATH 中删除: %INSTALL_DIR%
+echo 3. Windows 凭据管理器中的登录信息未删除
+echo    如需删除请在"控制面板 ^> 凭据管理器"中手动删除
 echo.
 pause
 '@
