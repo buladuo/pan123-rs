@@ -183,8 +183,10 @@ pub struct PresignedUrlsData {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct UploadCompleteData {
-    #[serde(rename = "file_info")]
+    #[serde(rename = "file_info", alias = "FileInfo", alias = "Info")]
     pub file_info: Option<FileInfo>,
+    #[serde(rename = "async")]
+    pub is_async: Option<bool>,
 }
 
 #[derive(Debug, Clone)]

@@ -33,7 +33,7 @@ use crate::transfer::{
     UploadDirectoryReport, UploadFailureKind, UploadOptions,
 };
 
-const DEFAULT_BASE_URL: &str = "https://www.123pan.com/api";
+const DEFAULT_BASE_URL: &str = "https://api.123278.com";
 const DEFAULT_UCENTER_URL: &str = "https://login.123pan.com";
 
 #[derive(Debug, Clone)]
@@ -76,10 +76,10 @@ impl Pan123Client {
             HeaderValue::from_static("zh-CN,zh;q=0.9,en;q=0.8"),
         );
         headers.insert("App-Version", HeaderValue::from_static("3"));
-        headers.insert("Origin", HeaderValue::from_static("https://www.123pan.com"));
+        headers.insert("Origin", HeaderValue::from_static("https://yun.123pan.cn"));
         headers.insert(
             "Referer",
-            HeaderValue::from_static("https://www.123pan.com/"),
+            HeaderValue::from_static("https://yun.123pan.cn/"),
         );
         headers.insert("platform", HeaderValue::from_static("web"));
         headers.insert(
@@ -1201,7 +1201,7 @@ impl Pan123Client {
         }
         if let Some(data) = res.data {
             if let Some(domain) = data.domains.first() {
-                self.base_url = format!("https://{domain}/api");
+                self.base_url = format!("https://{domain}");
             }
             if let Some(domain) = data.ucenter_domain {
                 self.ucenter_url = format!("https://{domain}");
@@ -1335,9 +1335,7 @@ impl Pan123Client {
     }
 
     fn domain(&self) -> &str {
-        self.base_url
-            .strip_suffix("/api")
-            .unwrap_or("https://www.123pan.com")
+        &self.base_url
     }
 
     fn with_auth(
