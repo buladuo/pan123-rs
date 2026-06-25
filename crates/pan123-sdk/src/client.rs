@@ -772,6 +772,12 @@ impl Pan123Client {
             .ok_or_else(|| Pan123Error::InvalidPath(file_path.display().to_string()))?
             .to_string();
         let file_size = metadata.len();
+
+        // 对于大文件，提示用户正在计算哈希
+        if file_size > 500 * 1024 * 1024 {
+            eprintln!("正在计算文件哈希（文件大小: {:.2} GB）...", file_size as f64 / (1024.0 * 1024.0 * 1024.0));
+        }
+
         let md5_hash = self.calculate_file_md5(file_path)?;
 
         let request_url = format!("{}/b/api/file/upload_request", self.domain());
@@ -1321,7 +1327,11 @@ impl Pan123Client {
     fn calculate_file_md5(&self, file_path: &Path) -> Result<String> {
         let mut context = Context::new();
         let mut file = File::open(file_path)?;
-        let mut buffer = [0u8; 4 * 1024 * 1024];
+        let file_size = file.metadata()?.len();
+
+        // 使用更大的缓冲区提高性能（16MB）
+        let mut buffer = vec![0u8; 16 * 1024 * 1024];
+        let mut processed = 0u64;
 
         loop {
             let bytes = file.read(&mut buffer)?;
@@ -1329,6 +1339,13 @@ impl Pan123Client {
                 break;
             }
             context.consume(&buffer[..bytes]);
+            processed += bytes as u64;
+
+            // 对于大文件（>500MB），每处理 500MB 输出一次进度
+            if file_size > 500 * 1024 * 1024 && processed % (500 * 1024 * 1024) == 0 {
+                let percent = (processed * 100) / file_size;
+                eprintln!("计算 MD5: {}%", percent);
+            }
         }
 
         Ok(format!("{:x}", context.finalize()))
