@@ -824,15 +824,16 @@ impl Pan123Cli {
     fn find_child_by_name(&self, parent_id: u64, name: &str) -> Result<Option<FileInfo>> {
         let items = self.client()?.get_file_list(parent_id, 1, 500)?;
 
-        // 先尝试精确匹配
+        // 先尝试精确匹配（区分大小写）
         if let Some(item) = items.iter().find(|item| item.file_name == name) {
             return Ok(Some(item.clone()));
         }
 
-        // 如果精确匹配失败，尝试前缀匹配（支持不完整的文件名）
+        // 如果精确匹配失败，尝试大小写不敏感的前缀匹配
+        let name_lower = name.to_lowercase();
         let matches: Vec<_> = items
             .iter()
-            .filter(|item| item.file_name.starts_with(name))
+            .filter(|item| item.file_name.to_lowercase().starts_with(&name_lower))
             .collect();
 
         match matches.len() {
@@ -1339,7 +1340,10 @@ impl ShellState {
         let mut candidates = items
             .into_iter()
             .filter(|item| {
-                (!directories_only || item.is_dir()) && item.file_name.starts_with(&needle)
+                // 大小写不敏感的前缀匹配
+                let name_lower = item.file_name.to_lowercase();
+                let needle_lower = needle.to_lowercase();
+                (!directories_only || item.is_dir()) && name_lower.starts_with(&needle_lower)
             })
             .map(|item| {
                 let replacement =
@@ -1645,11 +1649,29 @@ fn build_completion_replacement(base_prefix: &str, name: &str, is_dir: bool) -> 
 
 fn extract_token(line: &str, pos: usize) -> (usize, String) {
     let prefix = &line[..pos];
-    let start = prefix
-        .rfind(char::is_whitespace)
-        .map(|idx| idx + 1)
-        .unwrap_or(0);
-    (start, prefix[start..].to_string())
+
+    // 检查是否在引号内
+    let mut in_quote = false;
+    let mut start = 0;
+
+    for (i, ch) in prefix.char_indices() {
+        if ch == '"' {
+            in_quote = !in_quote;
+            if in_quote {
+                // 进入引号，记录起始位置（引号后）
+                start = i + 1;
+            }
+        } else if ch.is_whitespace() && !in_quote {
+            // 空格且不在引号内，更新起始位置
+            start = i + 1;
+        }
+    }
+
+    // 提取 token，去掉引号
+    let token = prefix[start..].to_string();
+    let token = token.trim_start_matches('"').to_string();
+
+    (start, token)
 }
 
 fn split_line_tokens(line: &str) -> Vec<String> {
@@ -2016,16 +2038,18 @@ fn filter_candidates(candidates: Vec<ShellCandidate>, needle: &str) -> Vec<Shell
     if needle.is_empty() {
         return candidates;
     }
+    let needle_lower = needle.to_lowercase();
     candidates
         .into_iter()
         .filter(|candidate| {
-            candidate
+            let filename = candidate
                 .replacement
                 .trim_end_matches(['/', '\\'])
                 .rsplit(['/', '\\'])
                 .next()
-                .unwrap_or("")
-                .starts_with(needle)
+                .unwrap_or("");
+            let filename_lower = filename.to_lowercase();
+            filename_lower.starts_with(&needle_lower)
         })
         .collect()
 }
