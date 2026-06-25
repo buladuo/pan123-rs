@@ -880,6 +880,16 @@ impl Pan123Client {
                 .stack_size(4 * 1024 * 1024)
                 .spawn(move || {
                     let _uploaded = uploaded_counter; // Keep reference alive for potential future use
+
+                    // 每个线程打开一次文件，避免重复打开
+                    let mut file = match File::open(file_path_clone.as_ref()) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            let _ = tx.send((0, Err(e.into())));
+                            return;
+                        }
+                    };
+
                     loop {
                     let part_number = {
                         let mut guard = part_queue.lock().expect("part queue lock poisoned");
@@ -889,31 +899,21 @@ impl Pan123Client {
                         break;
                     };
 
-                    let mut file = match File::open(file_path_clone.as_ref()) {
-                        Ok(f) => f,
-                        Err(e) => {
-                            let _ = tx.send((part_number, Err(e.into())));
-                            break;
-                        }
-                    };
-
                     let offset = (part_number - 1) * slice_size;
                     if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)) {
                         let _ = tx.send((part_number, Err(e.into())));
-                        break;
-                    }
+                        continue;
+                    };
 
-                    let mut chunk = Vec::with_capacity(slice_size as usize);
-                    let _read_len = match file
-                        .take(slice_size)
-                        .read_to_end(&mut chunk)
-                    {
+                    let mut chunk = vec![0u8; slice_size as usize];
+                    let read_len = match file.read(&mut chunk) {
                         Ok(len) => len,
                         Err(e) => {
                             let _ = tx.send((part_number, Err(e.into())));
-                            break;
+                            continue;
                         }
                     };
+                    chunk.truncate(read_len);
 
                     let auth_url = if multipart {
                         format!(
@@ -1332,6 +1332,17 @@ impl Pan123Client {
         // 使用更大的缓冲区提高性能（16MB）
         let mut buffer = vec![0u8; 16 * 1024 * 1024];
         let mut processed = 0u64;
+        let mut last_percent = 0u8;
+
+        // 对于大文件显示进度条
+        let show_progress = file_size > 500 * 1024 * 1024;
+        if show_progress {
+            eprint!("计算哈希: [");
+            for _ in 0..30 {
+                eprint!("░");
+            }
+            eprint!("] 0%\r");
+        }
 
         loop {
             let bytes = file.read(&mut buffer)?;
@@ -1341,11 +1352,25 @@ impl Pan123Client {
             context.consume(&buffer[..bytes]);
             processed += bytes as u64;
 
-            // 对于大文件（>500MB），每处理 500MB 输出一次进度
-            if file_size > 500 * 1024 * 1024 && processed % (500 * 1024 * 1024) == 0 {
-                let percent = (processed * 100) / file_size;
-                eprintln!("计算 MD5: {}%", percent);
+            if show_progress {
+                let percent = ((processed * 100) / file_size) as u8;
+                if percent != last_percent {
+                    last_percent = percent;
+                    let filled = (percent as usize * 30) / 100;
+                    eprint!("计算哈希: [");
+                    for _ in 0..filled {
+                        eprint!("█");
+                    }
+                    for _ in filled..30 {
+                        eprint!("░");
+                    }
+                    eprint!("] {}%\r", percent);
+                }
             }
+        }
+
+        if show_progress {
+            eprintln!("计算哈希: [██████████████████████████████] 100%");
         }
 
         Ok(format!("{:x}", context.finalize()))
