@@ -27,6 +27,10 @@ Cargo.lock
 *.temp
 *.log
 test_output/
+test-*.txt
+
+# Claude Code 生成的过程文件
+*.pdf
 
 # 系统文件
 Thumbs.db
