@@ -795,7 +795,8 @@ impl Pan123Client {
             "type": 0
         });
 
-        let mut response: ApiEnvelope<UploadRequestData> = self.retry_with_backoff_emit(
+        // 第一次请求
+        let mut response: ApiEnvelope<serde_json::Value> = self.retry_with_backoff_emit(
             retry,
             transfer_id,
             TransferKind::Upload,
@@ -807,6 +808,8 @@ impl Pan123Client {
                 )
             },
         )?;
+
+        // 如果文件已存在（code 5060），添加 duplicate 参数重新请求
         if response.code == 5060 {
             if duplicate == DuplicateMode::Cancel {
                 return Err(Pan123Error::Operation(
@@ -827,6 +830,7 @@ impl Pan123Client {
                 },
             )?;
         }
+
         if response.code != 0 {
             return Err(Pan123Error::Api {
                 code: response.code,
@@ -834,7 +838,9 @@ impl Pan123Client {
             });
         }
 
-        let data = self.unwrap_data(response)?;
+        // 现在解析为具体的 UploadRequestData
+        let data: UploadRequestData = serde_json::from_value(response.data.unwrap_or(serde_json::Value::Null))
+            .map_err(|e| Pan123Error::Operation(format!("failed to parse upload request data: {}", e)))?;
         if data.reuse {
             return data.info.ok_or_else(|| {
                 Pan123Error::Operation("reuse upload returned without file info".into())
