@@ -31,6 +31,10 @@ test-*.txt
 
 # Claude Code 生成的过程文件
 *.pdf
+*_IMPROVEMENTS.md
+*_FIX.md
+*_PERMISSIONS.md
+SUMMARY.md
 
 # 系统文件
 Thumbs.db

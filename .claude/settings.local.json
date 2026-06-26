@@ -8,7 +8,27 @@
       "Bash(chmod +x *)",
       "Bash(cargo fmt *)",
       "Bash(cargo clippy *)",
-      "Bash(cargo test *)"
+      "Bash(cargo test *)",
+      "PowerShell(cargo build *)",
+      "PowerShell(cd C:\\\\Users\\\\32366\\\\Projects\\\\pan123-rs; $env:RUST_BACKTRACE='1'; .\\\\target\\\\debug\\\\pan123.exe upload test-upload.txt 2>&1 | Select-Object -Last 50)",
+      "PowerShell(cd C:\\\\Users\\\\32366\\\\Projects\\\\pan123-rs; $env:RUST_LOG='debug'; .\\\\target\\\\debug\\\\pan123.exe upload tiny.txt 2>&1 | Select-Object -First 100)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git fetch *)",
+      "PowerShell(.\\\\target\\\\release\\\\pan123.exe upload tiny.txt 2>&1 | Select-Object -First 30)",
+      "PowerShell(.\\\\target\\\\release\\\\pan123.exe upload tiny.txt 2>&1 | Select-Object -First 15)",
+      "PowerShell(echo \"test merge\" > test-merge.txt; .\\\\target\\\\release\\\\pan123.exe upload test-merge.txt 2>&1 | Select-Object -First 20)",
+      "PowerShell(cargo *)",
+      "PowerShell(.\\\\target\\\\release\\\\pan123.exe upload test-merge.txt 2>&1 | Select-Object -First 20)",
+      "PowerShell(git add *)",
+      "PowerShell(git checkout *)",
+      "PowerShell(git push *)",
+      "PowerShell(git commit *)",
+      "Bash(git reset *)",
+      "Bash(git push *)",
+      "Bash(git pull *)",
+      "Bash(git stash *)",
+      "Bash(cargo run *)"
     ]
   }
 }
