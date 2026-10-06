@@ -1,3 +1,7 @@
+// thiserror 的 #[from] 会派生出一个与枚举同级的 impl，其中的字段初始化会被
+// clippy::redundant_field_names 误报；由于派生代码不在枚举属性作用域内，需在模块级豁免。
+#![allow(clippy::redundant_field_names)]
+
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, Pan123Error>;

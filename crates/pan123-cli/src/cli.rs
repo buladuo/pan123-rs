@@ -841,7 +841,11 @@ impl Pan123Cli {
             1 => Ok(Some(matches[0].clone())),
             _ => {
                 // 多个匹配，提示用户
-                eprintln!("{}，找到 {} 个匹配:", "文件名不明确".yellow(), matches.len());
+                eprintln!(
+                    "{}，找到 {} 个匹配:",
+                    "文件名不明确".yellow(),
+                    matches.len()
+                );
                 for item in &matches {
                     eprintln!("  - {} (ID: {})", item.file_name, item.file_id);
                 }
