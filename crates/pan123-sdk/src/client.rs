@@ -91,11 +91,11 @@ impl Pan123Client {
         let client = Client::builder()
             .cookie_store(true)
             .default_headers(headers)
-            .timeout(Duration::from_secs(300))  // 5分钟总超时
-            .connect_timeout(Duration::from_secs(30))  // 30秒连接超时
-            .pool_idle_timeout(Duration::from_secs(90))  // 连接池空闲超时
-            .pool_max_idle_per_host(10)  // 每个主机最多10个空闲连接
-            .tcp_keepalive(Duration::from_secs(60))  // TCP keep-alive
+            .timeout(Duration::from_secs(300)) // 5分钟总超时
+            .connect_timeout(Duration::from_secs(30)) // 30秒连接超时
+            .pool_idle_timeout(Duration::from_secs(90)) // 连接池空闲超时
+            .pool_max_idle_per_host(10) // 每个主机最多10个空闲连接
+            .tcp_keepalive(Duration::from_secs(60)) // TCP keep-alive
             .build()?;
 
         let rate_limiter =
@@ -769,7 +769,10 @@ impl Pan123Client {
 
         // 对于大文件，提示用户正在计算哈希
         if file_size > 500 * 1024 * 1024 {
-            eprintln!("正在计算文件哈希（文件大小: {:.2} GB）...", file_size as f64 / (1024.0 * 1024.0 * 1024.0));
+            eprintln!(
+                "正在计算文件哈希（文件大小: {:.2} GB）...",
+                file_size as f64 / (1024.0 * 1024.0 * 1024.0)
+            );
         }
 
         let md5_hash = self.calculate_file_md5(file_path)?;
@@ -839,8 +842,10 @@ impl Pan123Client {
         }
 
         // 现在解析为具体的 UploadRequestData
-        let data: UploadRequestData = serde_json::from_value(response.data.unwrap_or(serde_json::Value::Null))
-            .map_err(|e| Pan123Error::Operation(format!("failed to parse upload request data: {}", e)))?;
+        let data: UploadRequestData =
+            serde_json::from_value(response.data.unwrap_or(serde_json::Value::Null)).map_err(
+                |e| Pan123Error::Operation(format!("failed to parse upload request data: {}", e)),
+            )?;
         if data.reuse {
             return data.info.ok_or_else(|| {
                 Pan123Error::Operation("reuse upload returned without file info".into())
@@ -902,93 +907,96 @@ impl Pan123Client {
                     };
 
                     loop {
-                    let part_number = {
-                        let mut guard = part_queue.lock().expect("part queue lock poisoned");
-                        guard.pop()
-                    };
-                    let Some(part_number) = part_number else {
-                        break;
-                    };
+                        let part_number = {
+                            let mut guard = part_queue.lock().expect("part queue lock poisoned");
+                            guard.pop()
+                        };
+                        let Some(part_number) = part_number else {
+                            break;
+                        };
 
-                    let offset = (part_number - 1) * slice_size;
-                    if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)) {
-                        let _ = tx.send((part_number, Err(e.into())));
-                        continue;
-                    };
-
-                    let mut chunk = vec![0u8; slice_size as usize];
-                    let read_len = match file.read(&mut chunk) {
-                        Ok(len) => len,
-                        Err(e) => {
+                        let offset = (part_number - 1) * slice_size;
+                        if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)) {
                             let _ = tx.send((part_number, Err(e.into())));
                             continue;
-                        }
-                    };
-                    chunk.truncate(read_len);
+                        };
 
-                    let auth_url = if multipart {
-                        format!(
-                            "{}/b/api/file/s3_repare_upload_parts_batch",
-                            client.domain()
-                        )
-                    } else {
-                        format!("{}/b/api/file/s3_upload_object/auth", client.domain())
-                    };
+                        let mut chunk = vec![0u8; slice_size as usize];
+                        let read_len = match file.read(&mut chunk) {
+                            Ok(len) => len,
+                            Err(e) => {
+                                let _ = tx.send((part_number, Err(e.into())));
+                                continue;
+                            }
+                        };
+                        chunk.truncate(read_len);
 
-                    let auth_payload = json!({
-                        "bucket": bucket,
-                        "key": key,
-                        "partNumberStart": part_number,
-                        "partNumberEnd": part_number + 1,
-                        "uploadId": upload_id,
-                        "StorageNode": storage_node
-                    });
+                        let auth_url = if multipart {
+                            format!(
+                                "{}/b/api/file/s3_repare_upload_parts_batch",
+                                client.domain()
+                            )
+                        } else {
+                            format!("{}/b/api/file/s3_upload_object/auth", client.domain())
+                        };
 
-                    let chunk_len = chunk.len();
-                    let result = client.retry_with_backoff_emit(
-                        retry,
-                        &transfer_id,
-                        TransferKind::Upload,
-                        &progress,
-                        |_, _| {
-                            let auth_res: ApiEnvelope<PresignedUrlsData> = client.send_json(
+                        let auth_payload = json!({
+                            "bucket": bucket,
+                            "key": key,
+                            "partNumberStart": part_number,
+                            "partNumberEnd": part_number + 1,
+                            "uploadId": upload_id,
+                            "StorageNode": storage_node
+                        });
+
+                        let chunk_len = chunk.len();
+                        let result = client.retry_with_backoff_emit(
+                            retry,
+                            &transfer_id,
+                            TransferKind::Upload,
+                            &progress,
+                            |_, _| {
+                                let auth_res: ApiEnvelope<PresignedUrlsData> = client.send_json(
+                                    client
+                                        .client
+                                        .post(&auth_url)
+                                        .query(&client.dynamic_params()),
+                                    Some(auth_payload.clone()),
+                                )?;
+                                let mut pre_signed = client.unwrap_data(auth_res)?.presigned_urls;
+                                let put_url = pre_signed
+                                    .remove(&part_number.to_string())
+                                    .ok_or_else(|| {
+                                        Pan123Error::Operation(format!(
+                                            "missing pre-signed url for part {part_number}"
+                                        ))
+                                    })?;
+
+                                // 为大分片使用更长的超时时间
+                                // 假设最低速度 1MB/s，给予 2 倍缓冲时间
+                                let chunk_mb = chunk_len / (1024 * 1024).max(1);
+                                let timeout_secs = (chunk_mb * 2).max(300); // 至少 5 分钟，最多根据分片大小调整
+
                                 client
                                     .client
-                                    .post(&auth_url)
-                                    .query(&client.dynamic_params()),
-                                Some(auth_payload.clone()),
-                            )?;
-                            let mut pre_signed = client.unwrap_data(auth_res)?.presigned_urls;
-                            let put_url =
-                                pre_signed.remove(&part_number.to_string()).ok_or_else(|| {
-                                    Pan123Error::Operation(format!(
-                                        "missing pre-signed url for part {part_number}"
-                                    ))
-                                })?;
+                                    .put(&put_url)
+                                    .header("Content-Length", chunk_len.to_string())
+                                    .timeout(Duration::from_secs(timeout_secs as u64))
+                                    .body(chunk.clone())
+                                    .send()?
+                                    .error_for_status()?;
+                                Ok(chunk_len as u64)
+                            },
+                        );
 
-                            // 为大分片使用更长的超时时间
-                            // 假设最低速度 1MB/s，给予 2 倍缓冲时间
-                            let chunk_mb = chunk_len / (1024 * 1024).max(1);
-                            let timeout_secs = (chunk_mb * 2).max(300); // 至少 5 分钟，最多根据分片大小调整
-
-                            client
-                                .client
-                                .put(&put_url)
-                                .header("Content-Length", chunk_len.to_string())
-                                .timeout(Duration::from_secs(timeout_secs as u64))
-                                .body(chunk.clone())
-                                .send()?
-                                .error_for_status()?;
-                            Ok(chunk_len as u64)
-                        },
-                    );
-
-                    if tx.send((part_number, result)).is_err() {
-                        break;
+                        if tx.send((part_number, result)).is_err() {
+                            break;
+                        }
                     }
-                }
-            })
-            .map_err(|e| Pan123Error::Operation(format!("failed to spawn upload thread: {}", e)))?;
+                })
+                .map_err(|e| {
+                    Pan123Error::Operation(format!("failed to spawn upload thread: {}", e))
+                })?;
             handles.push(handle);
         }
         drop(tx);
@@ -1172,7 +1180,12 @@ impl Pan123Client {
                         }
                     }
                 })
-                .map_err(|e| Pan123Error::Operation(format!("failed to spawn directory upload thread: {}", e)))?;
+                .map_err(|e| {
+                    Pan123Error::Operation(format!(
+                        "failed to spawn directory upload thread: {}",
+                        e
+                    ))
+                })?;
             handles.push(handle);
         }
         drop(tx);
