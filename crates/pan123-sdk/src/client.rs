@@ -36,6 +36,16 @@ use crate::transfer::{
 const DEFAULT_BASE_URL: &str = "https://api.123278.com";
 const DEFAULT_UCENTER_URL: &str = "https://login.123pan.com";
 
+/// 域名发现失败时按序尝试的 ucenter 候选地址。
+const FALLBACK_UCENTER_URLS: &[&str] = &[DEFAULT_UCENTER_URL, "https://user.123pan.cn"];
+
+/// 域名发现请求的超时，避免网络异常时长时间阻塞。
+const DOMAIN_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// 域名环境变量覆盖项，优先级高于服务端下发与内置默认值。
+const ENV_BASE_URL: &str = "PAN123_BASE_URL";
+const ENV_UCENTER_URL: &str = "PAN123_UCENTER_URL";
+
 #[derive(Debug, Clone)]
 pub enum TokenCheckStatus {
     Missing,
@@ -110,7 +120,16 @@ impl Pan123Client {
             rate_limiter,
         };
 
-        instance.init_domains()?;
+        instance.init_domains();
+
+        // 环境变量覆盖优先级最高：用于 DNS/代理异常时显式指定可用域名。
+        if let Some(url) = env_url_override(ENV_BASE_URL) {
+            instance.base_url = url;
+        }
+        if let Some(url) = env_url_override(ENV_UCENTER_URL) {
+            instance.ucenter_url = url;
+        }
+
         Ok(instance)
     }
 
@@ -138,17 +157,19 @@ impl Pan123Client {
             Err(Pan123Error::Api { .. }) | Err(Pan123Error::AuthRequired) => {
                 TokenCheckStatus::Invalid
             }
-            Err(Pan123Error::Http { .. }) => {
-                TokenCheckStatus::Unreachable("network error".to_string())
-            }
+            Err(Pan123Error::Http { .. }) => TokenCheckStatus::Unreachable(format!(
+                "无法连接 {}，请检查网络、DNS 或代理（例如 Clash 等代理工具的 DNS 劫持或分流规则）；可用 {ENV_BASE_URL} / {ENV_UCENTER_URL} 指定可用域名",
+                self.base_url
+            )),
             Err(err) => TokenCheckStatus::Unreachable(err.to_string()),
         }
     }
 
     pub fn login_by_qrcode(&mut self) -> Result<()> {
         let url = format!("{}/api/user/qr-code/generate", self.ucenter_url);
-        let res: ApiEnvelope<QrGenerateData> =
-            self.send_json(self.client.get(url), None::<Value>)?;
+        let res: ApiEnvelope<QrGenerateData> = self
+            .send_json(self.client.get(url), None::<Value>)
+            .map_err(|err| with_network_hint(&self.ucenter_url, err))?;
         let data = self.unwrap_data(res)?;
         let scan_url = format!(
             "https://www.123pan.com/wx-app-login.html?env=production&uniID={}&source=123pan&type=login",
@@ -1231,25 +1252,31 @@ impl Pan123Client {
         Ok(chain)
     }
 
-    fn init_domains(&mut self) -> Result<()> {
-        let url = format!("{}/api/dydomain", DEFAULT_UCENTER_URL);
-        let res: ApiEnvelope<DomainData> = match self.send_json(self.client.get(url), None::<Value>)
-        {
-            Ok(res) => res,
-            Err(_) => return Ok(()),
-        };
-        if res.code != 0 {
-            return Ok(());
-        }
-        if let Some(data) = res.data {
-            if let Some(domain) = data.domains.first() {
-                self.base_url = format!("https://{domain}");
+    /// 尽力从服务端发现当前域名：依次尝试候选地址，全部失败时保留内置默认值
+    /// （调用方可用环境变量覆盖）。失败不再静默——后续请求报错会附带排查提示。
+    fn init_domains(&mut self) {
+        for candidate in FALLBACK_UCENTER_URLS {
+            let url = format!("{candidate}/api/dydomain");
+            let res: ApiEnvelope<DomainData> = match self.send_json(
+                self.client.get(url).timeout(DOMAIN_DISCOVERY_TIMEOUT),
+                None::<Value>,
+            ) {
+                Ok(res) => res,
+                Err(_) => continue,
+            };
+            if res.code != 0 {
+                continue;
             }
-            if let Some(domain) = data.ucenter_domain {
-                self.ucenter_url = format!("https://{domain}");
+            if let Some(data) = res.data {
+                if let Some(domain) = data.domains.first() {
+                    self.base_url = format!("https://{domain}");
+                }
+                if let Some(domain) = data.ucenter_domain {
+                    self.ucenter_url = format!("https://{domain}");
+                }
+                return;
             }
         }
-        Ok(())
     }
 
     fn print_qr_code(&self, content: &str) -> Result<()> {
@@ -1572,6 +1599,32 @@ impl Pan123Client {
 fn parse_total_from_content_range(header: &str) -> Option<u64> {
     let (_, total) = header.split_once('/')?;
     total.parse::<u64>().ok()
+}
+
+/// 读取域名环境变量覆盖值：自动补全 scheme 并去掉尾部斜杠。
+fn env_url_override(key: &str) -> Option<String> {
+    let value = std::env::var(key).ok()?;
+    let value = value.trim().trim_end_matches('/');
+    if value.is_empty() {
+        return None;
+    }
+    Some(
+        if value.starts_with("http://") || value.starts_with("https://") {
+            value.to_string()
+        } else {
+            format!("https://{value}")
+        },
+    )
+}
+
+/// 为网络连接失败补充排查提示（DNS/代理劫持是常见原因）。
+fn with_network_hint(url: &str, err: Pan123Error) -> Pan123Error {
+    match err {
+        Pan123Error::Http { source } => Pan123Error::Operation(format!(
+            "无法连接 {url}：{source}。请检查网络、DNS 或代理设置（例如 Clash 等代理工具的 DNS 劫持或分流规则），确认该域名解析到真实 IP；也可用 {ENV_UCENTER_URL} / {ENV_BASE_URL} 环境变量指定可用域名"
+        )),
+        other => other,
+    }
 }
 
 fn load_resume_meta(path: &Path) -> Option<DownloadResumeMeta> {
