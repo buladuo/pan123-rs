@@ -1,4 +1,4 @@
-﻿# Rust 编译产物
+# Rust 编译产物
 /target
 **/target
 Cargo.lock
@@ -13,6 +13,9 @@ Cargo.lock
 123pan_cwd.json
 *.token
 *.credentials
+
+# pan123 本地状态目录（macOS/Linux 无 APPDATA 时回退为相对路径 ./.pan123-cli）
+.pan123-cli/
 
 # IDE 和编辑器
 .vscode/
