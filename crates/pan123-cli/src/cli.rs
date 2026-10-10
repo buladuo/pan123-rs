@@ -1,8 +1,10 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
+use std::io::IsTerminal;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -61,6 +63,9 @@ const COMMANDS: &[&str] = &[
     version
 )]
 struct CliArgs {
+    /// 关闭彩色输出与进度条（stdout 不是终端时自动关闭）。
+    #[arg(long, global = true)]
+    no_color: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -194,6 +199,116 @@ impl From<DuplicateArg> for DuplicateMode {
     }
 }
 
+/// 颜色与进度条总开关。进程启动时按 TTY 与 `--no-color` 决定一次。
+static COLOR_ENABLED: AtomicBool = AtomicBool::new(true);
+
+pub fn color_enabled() -> bool {
+    COLOR_ENABLED.load(Ordering::Relaxed)
+}
+
+fn init_color_enabled(no_color_flag: bool) {
+    let enabled = !no_color_flag && std::io::stdout().is_terminal();
+    COLOR_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+/// 非 TTY 或显式 --no-color 时返回不施加任何颜色效果的字符串。
+#[derive(Clone, Copy)]
+struct Paint<'a>(&'a str);
+
+impl<'a> Paint<'a> {
+    fn green(self) -> String {
+        if color_enabled() {
+            self.0.green().to_string()
+        } else {
+            self.0.to_string()
+        }
+    }
+    fn red(self) -> String {
+        if color_enabled() {
+            self.0.red().to_string()
+        } else {
+            self.0.to_string()
+        }
+    }
+    fn yellow(self) -> String {
+        if color_enabled() {
+            self.0.yellow().to_string()
+        } else {
+            self.0.to_string()
+        }
+    }
+    fn bright_cyan(self) -> String {
+        if color_enabled() {
+            self.0.bright_cyan().to_string()
+        } else {
+            self.0.to_string()
+        }
+    }
+    fn bright_white(self) -> String {
+        if color_enabled() {
+            self.0.bright_white().to_string()
+        } else {
+            self.0.to_string()
+        }
+    }
+    fn bright_blue(self) -> String {
+        if color_enabled() {
+            self.0.bright_blue().to_string()
+        } else {
+            self.0.to_string()
+        }
+    }
+    fn bright_black(self) -> String {
+        if color_enabled() {
+            self.0.bright_black().to_string()
+        } else {
+            self.0.to_string()
+        }
+    }
+    fn bright_yellow(self) -> String {
+        if color_enabled() {
+            self.0.bright_yellow().to_string()
+        } else {
+            self.0.to_string()
+        }
+    }
+    fn bright_magenta(self) -> String {
+        if color_enabled() {
+            self.0.bright_magenta().to_string()
+        } else {
+            self.0.to_string()
+        }
+    }
+    fn bright_red(self) -> String {
+        if color_enabled() {
+            self.0.bright_red().to_string()
+        } else {
+            self.0.to_string()
+        }
+    }
+    fn dimmed(self) -> String {
+        if color_enabled() {
+            self.0.dimmed().to_string()
+        } else {
+            self.0.to_string()
+        }
+    }
+}
+
+/// 按颜色开关配置表格样式。
+///
+/// comfy-table 自身在 stdout 非 TTY 时就会去掉单元格样式，所以这里只需覆盖
+/// 「显式 --no-color 但 stdout 仍是 TTY」这一种情形。
+///
+/// 注意 `force_no_tty()` 同时会关闭动态宽度探测，此时 `ContentArrangement::Dynamic`
+/// 会退回非 TTY 的兜底宽度——这是刻意取舍：用户明确要求不要颜色时，宁可表格窄一点，
+/// 也不要混进 ANSI 码。comfy-table 没有提供「保留终端宽度但去掉样式」的组合。
+fn style_table(table: &mut Table) {
+    if !color_enabled() {
+        table.force_no_tty();
+    }
+}
+
 pub struct Pan123Cli {
     client: Option<Pan123Client>,
     shell_state: Arc<Mutex<ShellState>>,
@@ -202,6 +317,7 @@ pub struct Pan123Cli {
 impl Pan123Cli {
     pub fn run_from_env() -> Result<()> {
         let args = CliArgs::parse();
+        init_color_enabled(args.no_color);
         let mut cli = Self {
             client: None,
             shell_state: Arc::new(Mutex::new(ShellState::new())),
@@ -216,7 +332,7 @@ impl Pan123Cli {
         match command {
             Command::Login => match self.client_mut()?.check_token_status() {
                 TokenCheckStatus::Valid => {
-                    println!("{}", "当前登录状态仍然有效。".green());
+                    println!("{}", Paint("当前登录状态仍然有效。").green());
                     Ok(())
                 }
                 TokenCheckStatus::Unreachable(message) => Err(Pan123Error::Operation(format!(
@@ -224,7 +340,7 @@ impl Pan123Cli {
                 ))),
                 TokenCheckStatus::Missing | TokenCheckStatus::Invalid => {
                     self.client_mut()?.login_by_qrcode()?;
-                    println!("{}", "登录成功。".green());
+                    println!("{}", Paint("登录成功。").green());
                     Ok(())
                 }
             },
@@ -240,11 +356,11 @@ impl Pan123Cli {
                 let cwd = config::load_cwd();
                 println!(
                     "{} {} {}{}{}",
-                    "路径".bright_cyan().bold(),
-                    cwd.path.bright_white(),
-                    "(ID:".dimmed(),
-                    cwd.file_id.to_string().bright_black(),
-                    ")".dimmed()
+                    Paint("路径").bright_cyan(),
+                    Paint(&cwd.path).bright_white(),
+                    Paint("(ID:").dimmed(),
+                    Paint(&cwd.file_id.to_string()).bright_black(),
+                    Paint(")").dimmed()
                 );
                 Ok(())
             }
@@ -255,11 +371,11 @@ impl Pan123Cli {
                 config::save_cwd(&next)?;
                 println!(
                     "{} {} {}{}{}",
-                    "已切换到".green(),
-                    next.path.bright_blue().bold(),
-                    "(ID:".dimmed(),
-                    next.file_id.to_string().bright_black(),
-                    ")".dimmed()
+                    Paint("已切换到").green(),
+                    Paint(&next.path).bright_blue(),
+                    Paint("(ID:").dimmed(),
+                    Paint(&next.file_id.to_string()).bright_black(),
+                    Paint(")").dimmed()
                 );
                 Ok(())
             }
@@ -308,7 +424,7 @@ impl Pan123Cli {
                         .collect();
                     println!("{}", serde_json::to_string_pretty(&entries)?);
                 } else {
-                    println!("{}", resolved.path.bright_blue().bold());
+                    println!("{}", Paint(&resolved.path).bright_blue());
                     self.print_tree(resolved.file_id, String::new(), 1, depth)?;
                 }
                 Ok(())
@@ -355,11 +471,11 @@ impl Pan123Cli {
                     progress.finish();
                     println!(
                         "{} {} {}{}{}",
-                        "已上传".green(),
-                        info.file_name.bright_white(),
-                        "(ID:".dimmed(),
-                        info.file_id.to_string().bright_black(),
-                        ")".dimmed()
+                        Paint("已上传").green(),
+                        Paint(&info.file_name).bright_white(),
+                        Paint("(ID:").dimmed(),
+                        Paint(&info.file_id.to_string()).bright_black(),
+                        Paint(")").dimmed()
                     );
                 }
                 Ok(())
@@ -389,11 +505,11 @@ impl Pan123Cli {
                 progress.finish();
                 println!(
                     "{} {} {}{}{}",
-                    "已保存到".green(),
-                    file.file_path.display().to_string().bright_white(),
-                    "(".dimmed(),
-                    human_size(file.size).bright_yellow(),
-                    ")".dimmed()
+                    Paint("已保存到").green(),
+                    Paint(&file.file_path.display().to_string()).bright_white(),
+                    Paint("(").dimmed(),
+                    Paint(&human_size(file.size)).bright_yellow(),
+                    Paint(")").dimmed()
                 );
                 Ok(())
             }
@@ -410,11 +526,11 @@ impl Pan123Cli {
                 let info = self.client()?.create_folder(&folder_name, parent_id)?;
                 println!(
                     "{} {} {}{}{}",
-                    "已创建目录".green(),
-                    info.file_name.bright_blue(),
-                    "(ID:".dimmed(),
-                    info.file_id.to_string().bright_black(),
-                    ")".dimmed()
+                    Paint("已创建目录").green(),
+                    Paint(&info.file_name).bright_blue(),
+                    Paint("(ID:").dimmed(),
+                    Paint(&info.file_id.to_string()).bright_black(),
+                    Paint(")").dimmed()
                 );
                 Ok(())
             }
@@ -425,10 +541,10 @@ impl Pan123Cli {
                 self.client()?.rename_file(item.file_id, &new_name)?;
                 println!(
                     "{} {} {} {}",
-                    "已重命名".green(),
-                    item.file_name.bright_white(),
-                    "->".dimmed(),
-                    new_name.bright_white()
+                    Paint("已重命名").green(),
+                    Paint(&item.file_name).bright_white(),
+                    Paint("->").dimmed(),
+                    Paint(&new_name).bright_white()
                 );
                 Ok(())
             }
@@ -448,9 +564,9 @@ impl Pan123Cli {
                     .move_files(&file_ids, target_parent.file_id)?;
                 println!(
                     "{} {} {}",
-                    "已移动".green(),
-                    file_ids.len().to_string().bright_white(),
-                    format!("个条目到 {}", target_parent.path).bright_blue()
+                    Paint("已移动").green(),
+                    Paint(&file_ids.len().to_string()).bright_white(),
+                    Paint(&format!("个条目到 {}", target_parent.path)).bright_blue()
                 );
                 Ok(())
             }
@@ -470,9 +586,9 @@ impl Pan123Cli {
                     .copy_files(&file_ids, target_parent.file_id)?;
                 println!(
                     "{} {} {}",
-                    "已复制".green(),
-                    file_ids.len().to_string().bright_white(),
-                    format!("个条目到 {}", target_parent.path).bright_blue()
+                    Paint("已复制").green(),
+                    Paint(&file_ids.len().to_string()).bright_white(),
+                    Paint(&format!("个条目到 {}", target_parent.path)).bright_blue()
                 );
                 Ok(())
             }
@@ -487,9 +603,9 @@ impl Pan123Cli {
                 self.client()?.delete_files(&file_ids)?;
                 println!(
                     "{} {} {}",
-                    "已移动".yellow(),
-                    file_ids.len().to_string().bright_white(),
-                    "个条目到回收站".yellow()
+                    Paint("已移动").yellow(),
+                    Paint(&file_ids.len().to_string()).bright_white(),
+                    Paint("个条目到回收站").yellow()
                 );
                 Ok(())
             }
@@ -544,14 +660,14 @@ impl Pan123Cli {
                     let expired = upload_session::purge_expired();
                     println!(
                         "{} {} {}，{} {}",
-                        "缓存已清理。".green(),
-                        "已删除".bright_white(),
-                        format!("{removed} 个续传元数据文件").bright_yellow(),
-                        "以及".bright_white(),
-                        format!("{expired} 条过期上传会话").bright_yellow()
+                        Paint("缓存已清理。").green(),
+                        Paint("已删除").bright_white(),
+                        Paint(&format!("{removed} 个续传元数据文件")).bright_yellow(),
+                        Paint("以及").bright_white(),
+                        Paint(&format!("{expired} 条过期上传会话")).bright_yellow()
                     );
                 } else {
-                    println!("{}", "补全缓存已清理。".green());
+                    println!("{}", Paint("补全缓存已清理。").green());
                 }
                 Ok(())
             }
@@ -560,8 +676,8 @@ impl Pan123Cli {
                     let removed = upload_session::clear()?;
                     println!(
                         "{} 已清理 {} 条上传会话记录",
-                        "完成".green(),
-                        removed.to_string().bright_yellow()
+                        Paint("完成").green(),
+                        Paint(&removed.to_string()).bright_yellow()
                     );
                     return Ok(());
                 }
@@ -572,12 +688,13 @@ impl Pan123Cli {
                     return Ok(());
                 }
                 if sessions.is_empty() {
-                    println!("{}", "没有未完成的上传会话记录。".dimmed());
+                    println!("{}", Paint("没有未完成的上传会话记录。").dimmed());
                     return Ok(());
                 }
 
                 let now = upload_session::now_millis();
                 let mut table = Table::new();
+                style_table(&mut table);
                 table.load_preset(presets::UTF8_FULL);
                 table.set_header(vec![
                     Cell::new("文件名").add_attribute(Attribute::Bold),
@@ -599,9 +716,9 @@ impl Pan123Cli {
                 println!("{table}");
                 println!(
                     "{} 共 {} 条未完成会话（7 天自动过期）。用 {} 清空。",
-                    "提示".bright_blue(),
-                    sessions.len().to_string().bright_yellow(),
-                    "pan123 upload-sessions --clear".bright_white()
+                    Paint("提示").bright_blue(),
+                    Paint(&sessions.len().to_string()).bright_yellow(),
+                    Paint("pan123 upload-sessions --clear").bright_white()
                 );
                 Ok(())
             }
@@ -623,21 +740,19 @@ impl Pan123Cli {
     fn run_interactive(&mut self) -> Result<()> {
         println!(
             "\n{}",
-            "╔═══════════════════════════════════════════════════════════╗".bright_cyan()
+            Paint("╔═══════════════════════════════════════════════════════════╗").bright_cyan()
         );
         println!(
             "{}",
-            "║            📦 123pan 交互式终端 - 云盘管理工具            ║"
-                .bright_cyan()
-                .bold()
+            Paint("║            📦 123pan 交互式终端 - 云盘管理工具            ║").bright_cyan()
         );
         println!(
             "{}",
-            "╚═══════════════════════════════════════════════════════════╝".bright_cyan()
+            Paint("╚═══════════════════════════════════════════════════════════╝").bright_cyan()
         );
         println!(
             "{}",
-            "💡 按 Tab 补全命令和路径 | 输入 help 查看帮助 | 输入 exit 退出\n".dimmed()
+            Paint("💡 按 Tab 补全命令和路径 | 输入 help 查看帮助 | 输入 exit 退出\n").dimmed()
         );
 
         let mut editor = build_editor()?;
@@ -676,7 +791,7 @@ impl Pan123Cli {
                     let args = match shlex::split(&safe_line) {
                         Some(v) => v,
                         None => {
-                            eprintln!("{}", "命令行解析失败".red());
+                            eprintln!("{}", Paint("命令行解析失败").red());
                             continue;
                         }
                     };
@@ -688,10 +803,10 @@ impl Pan123Cli {
                             if let Some(command) = parsed.command
                                 && let Err(err) = self.execute(command)
                             {
-                                eprintln!("{} {}", "错误:".red().bold(), err);
+                                eprintln!("{} {}", Paint("错误:").red(), err);
                             }
                         }
-                        Err(err) => eprintln!("{}", err.to_string().red()),
+                        Err(err) => eprintln!("{}", Paint(&err.to_string()).red()),
                     }
                 }
                 Err(ReadlineError::Interrupted) => {
@@ -709,9 +824,10 @@ impl Pan123Cli {
     }
 
     fn print_help(&self) {
-        println!("\n📚 {}\n", "可用命令".bright_cyan().bold());
+        println!("\n📚 {}\n", Paint("可用命令").bright_cyan());
 
         let mut table = Table::new();
+        style_table(&mut table);
         table
             .load_preset(presets::UTF8_BORDERS_ONLY)
             .set_content_arrangement(ContentArrangement::Dynamic);
@@ -748,10 +864,10 @@ impl Pan123Cli {
         println!("{table}");
         println!(
             "\n{}\n  {}\n  {}\n  {}\n",
-            "💡 提示:".bright_cyan().bold(),
-            "REF 可以是: file_id、id:123、文件名、/path/to/file".dimmed(),
-            "find 支持: 普通搜索、通配符 (*.zip)、正则 (re:^code)".dimmed(),
-            "使用 --help 查看命令详细参数".dimmed()
+            Paint("💡 提示:").bright_cyan(),
+            Paint("REF 可以是: file_id、id:123、文件名、/path/to/file").dimmed(),
+            Paint("find 支持: 普通搜索、通配符 (*.zip)、正则 (re:^code)").dimmed(),
+            Paint("使用 --help 查看命令详细参数").dimmed()
         );
     }
 
@@ -759,7 +875,7 @@ impl Pan123Cli {
         match self.client_mut()?.check_token_status() {
             TokenCheckStatus::Valid => Ok(()),
             TokenCheckStatus::Missing | TokenCheckStatus::Invalid => {
-                println!("{}", "需要登录，正在启动二维码登录...".yellow());
+                println!("{}", Paint("需要登录，正在启动二维码登录...").yellow());
                 self.client_mut()?.login_by_qrcode()
             }
             TokenCheckStatus::Unreachable(message) => Err(Pan123Error::Operation(format!(
@@ -993,7 +1109,7 @@ impl Pan123Cli {
                 // 多个匹配，提示用户
                 eprintln!(
                     "{}，找到 {} 个匹配:",
-                    "文件名不明确".yellow(),
+                    Paint("文件名不明确").yellow(),
                     matches.len()
                 );
                 for item in &matches {
@@ -1022,11 +1138,12 @@ impl Pan123Cli {
 
     fn print_ls(&self, items: &[FileInfo]) {
         if items.is_empty() {
-            println!("{}", "当前目录为空。".dimmed());
+            println!("{}", Paint("当前目录为空。").dimmed());
             return;
         }
 
         let mut table = Table::new();
+        style_table(&mut table);
         table
             .load_preset(presets::UTF8_FULL)
             .set_content_arrangement(ContentArrangement::Dynamic)
@@ -1107,18 +1224,18 @@ impl Pan123Cli {
             let label = if item.is_dir() {
                 format!(
                     "{} {} {} {}",
-                    connector.bright_black(),
+                    Paint(connector).bright_black(),
                     icon,
-                    item.file_name.bright_blue().bold(),
-                    format!("({})", item.file_id).dimmed()
+                    Paint(&item.file_name).bright_blue(),
+                    Paint(&format!("({})", item.file_id)).dimmed()
                 )
             } else {
                 format!(
                     "{} {} {} {}",
-                    connector.bright_black(),
+                    Paint(connector).bright_black(),
                     icon,
-                    item.file_name.bright_white(),
-                    format!("({})", item.file_id).dimmed()
+                    Paint(&item.file_name).bright_white(),
+                    Paint(&format!("({})", item.file_id)).dimmed()
                 )
             };
             println!("{}{}", prefix, label);
@@ -1161,14 +1278,14 @@ impl Pan123Cli {
     fn print_upload_report(&self, report: &UploadDirectoryReport) {
         println!(
             "\n📤 {} {} {} {} {}\n",
-            "上传总结".bright_cyan().bold(),
-            "━".repeat(40).bright_black(),
-            format!("✓ {}", report.uploaded_count()).green().bold(),
-            format!("✗ {}", report.failed_count()).red().bold(),
+            Paint("上传总结").bright_cyan(),
+            Paint(&"━".repeat(40)).bright_black(),
+            Paint(&format!("✓ {}", report.uploaded_count())).green(),
+            Paint(&format!("✗ {}", report.failed_count())).red(),
             if report.is_complete_success() {
-                "🎉 全部完成".green().to_string()
+                Paint("🎉 全部完成").green()
             } else {
-                "⚠️  部分完成".yellow().to_string()
+                Paint("⚠️  部分完成").yellow()
             }
         );
 
@@ -1182,9 +1299,10 @@ impl Pan123Cli {
             .map(|(kind, count)| format!("{}={}", color_failure_kind(kind), count))
             .collect::<Vec<_>>()
             .join(", ");
-        println!("{} {}\n", "失败分类:".yellow().bold(), summary);
+        println!("{} {}\n", Paint("失败分类:").yellow(), summary);
 
         let mut table = Table::new();
+        style_table(&mut table);
         table
             .load_preset(presets::UTF8_FULL)
             .set_content_arrangement(ContentArrangement::Dynamic)
@@ -1221,11 +1339,12 @@ impl Pan123Cli {
         println!(
             "\n{} {} {}",
             icon,
-            "文件详情".bright_cyan().bold(),
-            "━".repeat(50).bright_black()
+            Paint("文件详情").bright_cyan(),
+            Paint(&"━".repeat(50)).bright_black()
         );
 
         let mut table = Table::new();
+        style_table(&mut table);
         table
             .load_preset(presets::UTF8_FULL)
             .set_content_arrangement(ContentArrangement::Dynamic);
@@ -1312,7 +1431,7 @@ impl Pan123Cli {
         if let Some(extra) = item.extra.as_object()
             && !extra.is_empty()
         {
-            println!("\n{}", "其他字段:".bright_cyan().bold());
+            println!("\n{}", Paint("其他字段:").bright_cyan());
             println!("{}", serde_json::to_string_pretty(&item.extra)?);
         }
 
@@ -1321,16 +1440,17 @@ impl Pan123Cli {
 
     fn print_find_results(&self, results: &[FileInfoWithPath]) {
         if results.is_empty() {
-            println!("{}", "没有找到匹配的条目。".dimmed());
+            println!("{}", Paint("没有找到匹配的条目。").dimmed());
             return;
         }
         println!(
             "\n🔍 {} {}\n",
-            "找到".bright_cyan().bold(),
-            format!("{} 个匹配项", results.len()).bright_white()
+            Paint("找到").bright_cyan(),
+            Paint(&format!("{} 个匹配项", results.len())).bright_white()
         );
 
         let mut table = Table::new();
+        style_table(&mut table);
         table
             .load_preset(presets::UTF8_FULL)
             .set_content_arrangement(ContentArrangement::Dynamic)
@@ -1629,17 +1749,17 @@ impl Highlighter for ShellHelper {
     }
 
     fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
-        Cow::Owned(hint.dimmed().to_string())
+        Cow::Owned(Paint(hint).dimmed())
     }
 
     fn highlight_candidate<'c>(&self, candidate: &'c str, _: CompletionType) -> Cow<'c, str> {
         if COMMANDS.contains(&candidate) {
-            return Cow::Owned(candidate.bright_magenta().bold().to_string());
+            return Cow::Owned(Paint(candidate).bright_magenta());
         }
         if candidate.ends_with('/') || candidate.ends_with(std::path::MAIN_SEPARATOR) {
-            return Cow::Owned(candidate.bright_blue().bold().to_string());
+            return Cow::Owned(Paint(candidate).bright_blue());
         }
-        Cow::Owned(candidate.bright_white().to_string())
+        Cow::Owned(Paint(candidate).bright_white())
     }
 }
 
@@ -1898,13 +2018,13 @@ fn is_option_value(prev: Option<&str>, options: &[&str]) -> bool {
 
 fn color_failure_kind(kind: UploadFailureKind) -> String {
     match kind {
-        UploadFailureKind::LocalIo => kind.as_str().yellow().to_string(),
-        UploadFailureKind::Network => kind.as_str().bright_magenta().to_string(),
-        UploadFailureKind::RemoteApi => kind.as_str().red().to_string(),
-        UploadFailureKind::Conflict => kind.as_str().bright_yellow().to_string(),
-        UploadFailureKind::Validation => kind.as_str().bright_blue().to_string(),
-        UploadFailureKind::Auth => kind.as_str().bright_red().bold().to_string(),
-        UploadFailureKind::Unknown => kind.as_str().bright_black().to_string(),
+        UploadFailureKind::LocalIo => Paint(kind.as_str()).yellow(),
+        UploadFailureKind::Network => Paint(kind.as_str()).bright_magenta(),
+        UploadFailureKind::RemoteApi => Paint(kind.as_str()).red(),
+        UploadFailureKind::Conflict => Paint(kind.as_str()).bright_yellow(),
+        UploadFailureKind::Validation => Paint(kind.as_str()).bright_blue(),
+        UploadFailureKind::Auth => Paint(kind.as_str()).bright_red(),
+        UploadFailureKind::Unknown => Paint(kind.as_str()).bright_black(),
     }
 }
 
@@ -1926,6 +2046,7 @@ impl CliProgress {
     }
 
     fn callback(&self) -> ProgressCallback {
+        let enabled = color_enabled();
         let multi = Arc::clone(&self.multi);
         let bars = Arc::clone(&self.bars);
         Arc::new(move |event| {
@@ -1937,7 +2058,12 @@ impl CliProgress {
                     path,
                     total_bytes,
                 } => {
-                    let pb = multi.add(ProgressBar::new(total_bytes.unwrap_or(0)));
+                    // 非 TTY 或 --no-color 时使用隐藏进度条，后续调用逻辑不变。
+                    let pb = if enabled {
+                        multi.add(ProgressBar::new(total_bytes.unwrap_or(0)))
+                    } else {
+                        ProgressBar::hidden()
+                    };
                     pb.set_style(progress_style(total_bytes.is_some()));
                     pb.set_prefix(match kind {
                         TransferKind::Upload => "上传",
