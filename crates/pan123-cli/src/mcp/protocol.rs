@@ -265,15 +265,36 @@ pub fn run_server<R: BufRead, W: Write + Send + 'static>(
     let pending: Arc<Mutex<HashMap<String, CancelToken>>> = Arc::new(Mutex::new(HashMap::new()));
     let active_workers: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let mut worker_handles = Vec::new();
-    let mut line = String::new();
+    let mut buf: Vec<u8> = Vec::new();
     let mut initialized = false;
 
     loop {
-        line.clear();
-        let read = (&mut reader).take(MAX_LINE_BYTES).read_line(&mut line)?;
+        buf.clear();
+        let read = match (&mut reader)
+            .take(MAX_LINE_BYTES)
+            .read_until(b'\n', &mut buf)
+        {
+            Ok(read) => read,
+            // 读错误（stdin 破损等）按 EOF 处理，走正常收尾。
+            // 不能用 `?` 直接返回：那会跳过 worker 与 writer 的 join，
+            // 丢掉在途响应并遗留分离的线程。
+            Err(_) => break,
+        };
         if read == 0 {
             break; // EOF：客户端关闭，干净退出。
         }
+        let line = match String::from_utf8(std::mem::take(&mut buf)) {
+            Ok(text) => text,
+            Err(err) => {
+                // 非法 UTF-8 退化为解析错误，服务继续。
+                let _ = tx.send(error_response(
+                    Value::Null,
+                    PARSE_ERROR,
+                    &format!("invalid UTF-8 in request: {err}"),
+                ));
+                continue;
+            }
+        };
         let parse_result = parse_line(&line);
         let request = match parse_result {
             Ok(request) => request,
@@ -681,6 +702,15 @@ mod tests {
         String::from_utf8(bytes).expect("utf8")
     }
 
+    fn run_with_bytes(handler: Arc<dyn ToolHandler>, input: &[u8]) -> String {
+        let reader = BufReader::new(Cursor::new(input.to_vec()));
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        run_server(handler, reader, SharedVec(Arc::clone(&sink)))
+            .expect("server should exit cleanly");
+        let bytes = sink.lock().unwrap().clone();
+        String::from_utf8(bytes).expect("utf8")
+    }
+
     #[derive(Clone)]
     struct SharedVec(Arc<Mutex<Vec<u8>>>);
 
@@ -805,6 +835,22 @@ mod tests {
         assert_eq!(lines[0]["error"]["code"], PARSE_ERROR);
         assert_eq!(lines[1]["id"], 9, "畸形输入之后仍须继续服务");
         assert!(lines[1]["result"].is_object(), "后续请求应被正常处理");
+    }
+
+    #[test]
+    fn invalid_utf8_line_does_not_stop_the_server() {
+        let handler: Arc<dyn ToolHandler> = Arc::new(FakeHandler);
+        let mut input = Vec::new();
+        input.extend_from_slice(INITIALIZE_LINE.as_bytes());
+        input.push(b'\n');
+        input.extend_from_slice(&[0xff, 0xfe, b'\n']);
+        input.extend_from_slice(b"{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\n");
+        let output = run_with_bytes(handler, &input);
+        let lines = response_lines(&output);
+        assert_eq!(lines.len(), 3, "initialize + 解析错误 + ping");
+        assert_eq!(lines[1]["error"]["code"], PARSE_ERROR);
+        assert_eq!(lines[2]["id"], 9, "非法 UTF-8 之后仍须继续服务");
+        assert!(lines[2]["result"].is_object());
     }
 
     #[test]
