@@ -238,7 +238,11 @@ pub fn tool_specs() -> Vec<ToolSpec> {
                 "parent_id": id_property("搜索起点目录，根目录为 0"),
                 "exact": { "type": "boolean", "description": "是否精确匹配名称，默认 false" },
                 "dir_only": { "type": "boolean", "description": "只返回目录" },
-                "file_only": { "type": "boolean", "description": "只返回文件" }
+                "file_only": { "type": "boolean", "description": "只返回文件" },
+                "depth": {
+                    "type": "integer",
+                    "description": "递归搜索的最大深度，默认 5；不会无界遍历整个云盘"
+                }
             }),
             &["query"],
         ),
@@ -756,8 +760,15 @@ impl ToolHandler for Pan123Tools {
                     .get("file_only")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                let depth = args.get("depth").and_then(Value::as_u64).unwrap_or(5);
+                let criteria = MatchCriteria {
+                    query,
+                    exact,
+                    dir_only,
+                    file_only,
+                };
                 let mut matches = Vec::new();
-                self.collect_matches(parent_id, query, exact, dir_only, file_only, &mut matches)?;
+                self.collect_matches(parent_id, &criteria, 0, depth as usize, ctx, &mut matches)?;
                 if matches.is_empty() {
                     return Ok(format!("没有匹配 {query:?} 的文件"));
                 }
@@ -771,6 +782,15 @@ impl ToolHandler for Pan123Tools {
     }
 }
 
+/// `find_files` 的匹配条件：关键词与各过滤开关。
+/// 聚合成一个结构体只是为了让 `collect_matches` 的参数个数不超过 clippy 上限。
+struct MatchCriteria<'a> {
+    query: &'a str,
+    exact: bool,
+    dir_only: bool,
+    file_only: bool,
+}
+
 impl Pan123Tools {
     fn render_tree(
         &self,
@@ -782,7 +802,7 @@ impl Pan123Tools {
         if level >= max_depth {
             return Ok(());
         }
-        let items = self.client.get_file_list(parent_id, 1, 100)?;
+        let items = self.client.get_file_list(parent_id, 1, 500)?;
         for item in items {
             out.push_str(&"  ".repeat(level));
             if item.is_dir() {
@@ -798,23 +818,29 @@ impl Pan123Tools {
     fn collect_matches(
         &self,
         parent_id: u64,
-        query: &str,
-        exact: bool,
-        dir_only: bool,
-        file_only: bool,
+        criteria: &MatchCriteria<'_>,
+        level: usize,
+        max_depth: usize,
+        ctx: &CallContext,
         out: &mut Vec<FileInfo>,
     ) -> Result<(), Pan123Error> {
-        let items = self.client.get_file_list(parent_id, 1, 100)?;
+        if ctx.cancel.load(Ordering::SeqCst) {
+            return Err(Pan123Error::Cancelled);
+        }
+        if level > max_depth {
+            return Ok(());
+        }
+        let items = self.client.get_file_list(parent_id, 1, 500)?;
         for item in items {
-            let name_matches = if exact {
-                item.file_name == query
+            let name_matches = if criteria.exact {
+                item.file_name == criteria.query
             } else {
-                item.file_name.contains(query)
+                item.file_name.contains(criteria.query)
             };
             if name_matches {
-                let kind_ok = if dir_only {
+                let kind_ok = if criteria.dir_only {
                     item.is_dir()
-                } else if file_only {
+                } else if criteria.file_only {
                     !item.is_dir()
                 } else {
                     true
@@ -824,7 +850,7 @@ impl Pan123Tools {
                 }
             }
             if item.is_dir() {
-                self.collect_matches(item.file_id, query, exact, dir_only, file_only, out)?;
+                self.collect_matches(item.file_id, criteria, level + 1, max_depth, ctx, out)?;
             }
         }
         Ok(())

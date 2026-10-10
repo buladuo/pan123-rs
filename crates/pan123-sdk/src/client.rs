@@ -1412,6 +1412,11 @@ impl Pan123Client {
                 .stack_size(4 * 1024 * 1024)
                 .spawn(move || {
                     loop {
+                        if let Some(token) = options.transfer.cancel.as_ref()
+                            && token.check().is_err()
+                        {
+                            break;
+                        }
                         let next = {
                             let mut guard = queue.lock().expect("upload queue lock poisoned");
                             guard.pop()

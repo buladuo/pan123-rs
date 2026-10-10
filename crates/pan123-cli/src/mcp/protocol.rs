@@ -15,7 +15,9 @@ pub const INVALID_PARAMS: i64 = -32602;
 
 /// 解析一行 stdin。成功返回请求对象；失败返回一个已构造好的 JSON-RPC 错误响应。
 pub fn parse_line(line: &str) -> std::result::Result<Value, Value> {
-    let trimmed = line.trim();
+    // U+FEFF 不是 Unicode 空白，直接 trim 不会去掉；而 PowerShell 5.1 给管道
+    // 内容加 BOM，那样首行会解析失败、initialize 永不成功，后续全部收到 -32600。
+    let trimmed = line.trim_start_matches('\u{feff}').trim();
     if trimmed.is_empty() {
         return Err(error_response(Value::Null, PARSE_ERROR, "empty message"));
     }
@@ -416,6 +418,9 @@ pub fn run_server<R: BufRead, W: Write + Send + 'static>(
             })
             .expect("failed to spawn tool worker thread");
         worker_handles.push(handle);
+        // 只保留仍在运行的句柄：已完成的不再需要 join，
+        // 长期存活的会话不应随时间无限累积。
+        worker_handles.retain(|handle| !handle.is_finished());
     }
 
     for handle in worker_handles {
@@ -852,6 +857,21 @@ mod tests {
         assert_eq!(lines[1]["error"]["code"], PARSE_ERROR);
         assert_eq!(lines[2]["id"], 9, "非法 UTF-8 之后仍须继续服务");
         assert!(lines[2]["result"].is_object());
+    }
+
+    #[test]
+    fn bom_prefixed_initialize_still_succeeds() {
+        let handler: Arc<dyn ToolHandler> = Arc::new(FakeHandler);
+        let mut input = Vec::new();
+        input.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+        input.extend_from_slice(INITIALIZE_LINE.as_bytes());
+        input.push(b'\n');
+        input.extend_from_slice(b"{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\n");
+        let output = run_with_bytes(handler, &input);
+        let lines = response_lines(&output);
+        assert_eq!(lines.len(), 2, "initialize 与 ping 都应有响应");
+        assert_eq!(lines[0]["id"], 0, "带 BOM 的 initialize 必须照常成功");
+        assert_eq!(lines[1]["id"], 9);
     }
 
     #[test]
