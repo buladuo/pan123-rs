@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -586,46 +586,45 @@ impl Pan123Client {
                         created_at: chrono::Utc::now().timestamp(),
                     },
                 )?;
-                let mut buffer = vec![0u8; 256 * 1024];
                 let mut downloaded = if existing > 0 && supports_resume {
                     existing
                 } else {
                     0
                 };
 
-                loop {
-                    let read = response.read(&mut buffer)?;
-                    if read == 0 {
-                        break;
-                    }
-                    output.write_all(&buffer[..read])?;
-                    downloaded += read as u64;
+                let start_offset = downloaded;
+                downloaded += crate::transfer::copy_stream_cancellable(
+                    &mut response,
+                    &mut output,
+                    None::<&crate::transfer::CancelToken>, // Task 3 接入 options.transfer.cancel
+                    |written| {
+                        let absolute = written + start_offset;
+                        if absolute % (1024 * 1024) == 0 {
+                            let _ = save_resume_meta(
+                                &meta_path,
+                                &DownloadResumeMeta {
+                                    url: link.url.clone(),
+                                    filename: link.filename.clone(),
+                                    total_bytes,
+                                    etag: etag.clone(),
+                                    last_modified: last_modified.clone(),
+                                    downloaded_bytes: absolute,
+                                    created_at: chrono::Utc::now().timestamp(),
+                                },
+                            );
+                        }
 
-                    if downloaded % (1024 * 1024) == 0 {
-                        save_resume_meta(
-                            &meta_path,
-                            &DownloadResumeMeta {
-                                url: link.url.clone(),
-                                filename: link.filename.clone(),
+                        self.emit(
+                            &progress,
+                            TransferEvent::Progress {
+                                id: transfer_id.clone(),
+                                kind: TransferKind::Download,
+                                bytes: absolute,
                                 total_bytes,
-                                etag: etag.clone(),
-                                last_modified: last_modified.clone(),
-                                downloaded_bytes: downloaded,
-                                created_at: chrono::Utc::now().timestamp(),
                             },
-                        )?;
-                    }
-
-                    self.emit(
-                        &progress,
-                        TransferEvent::Progress {
-                            id: transfer_id.clone(),
-                            kind: TransferKind::Download,
-                            bytes: downloaded,
-                            total_bytes,
-                        },
-                    );
-                }
+                        );
+                    },
+                )?;
 
                 output.sync_all()?;
                 fs::rename(&temp_path, &save_path)?;

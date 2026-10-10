@@ -16,6 +16,6 @@ pub use secure_storage::{SecureStorage, StorageBackend};
 pub use transfer::{
     CancelToken, CancelTokenExt, DownloadOptions, ProgressCallback, RetryPolicy, TransferEvent,
     TransferFailure, TransferKind, TransferOptions, UploadDirectoryReport, UploadFailureKind,
-    UploadOptions,
+    UploadOptions, copy_stream_cancellable,
 };
 pub use upload_session::UploadSession;

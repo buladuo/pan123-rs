@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -265,5 +266,83 @@ impl CancelTokenExt for CancelToken {
         } else {
             Ok(())
         }
+    }
+}
+
+/// 可取消的流拷贝。`on_chunk` 每次读取后调用，参数为累计写入字节数。
+pub fn copy_stream_cancellable<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    cancel: Option<&CancelToken>,
+    mut on_chunk: impl FnMut(u64),
+) -> crate::Result<u64> {
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut written: u64 = 0;
+    loop {
+        if let Some(token) = cancel {
+            token.check()?;
+        }
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        writer.write_all(&buffer[..read])?;
+        written += read as u64;
+        on_chunk(written);
+    }
+    Ok(written)
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::*;
+    use std::io::Cursor;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn copies_all_bytes_when_not_cancelled() {
+        let mut reader = Cursor::new(vec![7u8; 4096]);
+        let mut writer = Vec::new();
+        let mut seen = Vec::new();
+        let written =
+            copy_stream_cancellable(&mut reader, &mut writer, None, |total| seen.push(total))
+                .expect("copy should succeed");
+        assert_eq!(written, 4096);
+        assert_eq!(writer.len(), 4096);
+        assert_eq!(seen.last().copied(), Some(4096));
+    }
+
+    #[test]
+    fn returns_cancelled_when_token_already_set() {
+        let token: CancelToken = Arc::new(AtomicBool::new(true));
+        let mut reader = Cursor::new(vec![7u8; 4096]);
+        let mut writer = Vec::new();
+        let err = copy_stream_cancellable(&mut reader, &mut writer, Some(&token), |_| {})
+            .expect_err("should be cancelled");
+        assert!(matches!(err, crate::Pan123Error::Cancelled));
+        assert_eq!(writer.len(), 0, "取消后不应写入任何数据");
+    }
+
+    #[test]
+    fn stops_midway_when_cancelled_during_copy() {
+        // 输入 256 KiB、内部缓冲 64 KiB：第一块读满后回调置位取消令牌，
+        // 第二块开始前必须检出并停止，因此写入量应远小于总和。
+        let token: CancelToken = Arc::new(AtomicBool::new(false));
+        let token_for_cb = Arc::clone(&token);
+        let mut reader = Cursor::new(vec![7u8; 256 * 1024]);
+        let mut writer = Vec::new();
+        let err = copy_stream_cancellable(&mut reader, &mut writer, Some(&token), move |total| {
+            if total >= 1024 {
+                token_for_cb.store(true, Ordering::SeqCst);
+            }
+        })
+        .expect_err("should be cancelled midway");
+        assert!(matches!(err, crate::Pan123Error::Cancelled));
+        assert!(
+            writer.len() < 256 * 1024,
+            "应提前停止，实际写入 {}",
+            writer.len()
+        );
+        assert!(!writer.is_empty(), "取消前应至少完成一个分块");
     }
 }
