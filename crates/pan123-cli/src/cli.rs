@@ -1142,7 +1142,7 @@ impl Pan123Cli {
         if level > max_depth {
             return Ok(());
         }
-        let items = self.client()?.get_file_list(parent_id, 1, 100)?;
+        let items = self.client()?.get_file_list(parent_id, 1, 500)?;
         for item in items {
             let path = format!("{}/{}", prefix.trim_end_matches('/'), item.file_name);
             let is_dir = item.is_dir();
