@@ -1,6 +1,10 @@
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::Ordering;
 
-use pan123_sdk::{FileInfo, Pan123Client, Pan123Error};
+use pan123_sdk::{
+    DownloadOptions, DuplicateMode, FileInfo, Pan123Client, Pan123Error, ProgressCallback,
+    RetryPolicy, TransferEvent, TransferOptions, UploadOptions,
+};
 use serde_json::{Value, json};
 
 use crate::mcp::protocol::{CallContext, ToolCallOutcome, ToolHandler, ToolSpec};
@@ -112,6 +116,73 @@ where
             text: explain_error(&err),
             is_error: true,
         },
+    }
+}
+
+/// 校验本地路径是绝对路径且不含 `..`。避免文件落到 server 进程工作目录下的意外位置。
+pub fn absolute_local_path(raw: &str, key: &str) -> Result<PathBuf, String> {
+    let path = Path::new(raw);
+    if !path.is_absolute() {
+        return Err(format!(
+            "参数 {key} 必须是绝对路径（相对于 server 进程工作目录解析），收到 {raw:?}"
+        ));
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!("参数 {key} 不允许包含 .. 段：{raw:?}"));
+    }
+    Ok(path.to_path_buf())
+}
+
+pub fn duplicate_argument(args: &Value) -> Result<DuplicateMode, String> {
+    match args.get("duplicate").and_then(Value::as_str) {
+        None => Ok(DuplicateMode::KeepBoth),
+        Some("keep_both") => Ok(DuplicateMode::KeepBoth),
+        Some("overwrite") => Ok(DuplicateMode::Overwrite),
+        Some("cancel") => Ok(DuplicateMode::Cancel),
+        Some(other) => Err(format!(
+            "参数 duplicate 只能是 keep_both / overwrite / cancel，收到 {other:?}"
+        )),
+    }
+}
+
+/// 把 SDK 的 TransferEvent 桥接到 MCP 进度通知。没有 progressToken 时 report 自身会丢弃。
+pub fn transfer_callback(ctx: &CallContext) -> ProgressCallback {
+    let sink = ctx.progress.clone();
+    std::sync::Arc::new(move |event: TransferEvent| match event {
+        TransferEvent::Progress {
+            bytes, total_bytes, ..
+        } => sink.report(bytes, total_bytes, None),
+        TransferEvent::Started { total_bytes, .. } => {
+            sink.report(0, total_bytes, Some("开始传输"));
+        }
+        TransferEvent::Retrying { attempt, .. } => {
+            sink.report(0, None, Some(&format!("第 {attempt} 次重试")))
+        }
+        TransferEvent::Finished { total_bytes, .. } => {
+            sink.report(total_bytes, Some(total_bytes), Some("传输完成"));
+        }
+        TransferEvent::Failed { message, .. } => {
+            sink.report(0, None, Some(&format!("传输失败：{message}")))
+        }
+    })
+}
+
+fn retry_policy_from(args: &Value) -> RetryPolicy {
+    let mut policy = RetryPolicy::default();
+    if let Some(retries) = args.get("retries").and_then(Value::as_u64) {
+        policy.max_attempts = retries.max(1) as usize;
+    }
+    policy
+}
+
+fn owned_transfer_options(ctx: &CallContext, retry: RetryPolicy) -> TransferOptions {
+    TransferOptions {
+        retry,
+        cancel: Some(ctx.cancel.clone()),
+        ..Default::default()
     }
 }
 
@@ -417,11 +488,346 @@ impl ToolHandler for Pan123Tools {
                 }
                 Ok(format!("{} -> file_id={}", path, current))
             }),
+            "create_folder" => run_read_only(ctx, || {
+                let name = args
+                    .get("folder_name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| Pan123Error::Operation("缺少参数 folder_name".into()))?;
+                let parent_id = match args.get("parent_id") {
+                    Some(value) => {
+                        id_argument(value, "parent_id").map_err(Pan123Error::Operation)?
+                    }
+                    None => 0,
+                };
+                let created = self.client.create_folder(name, parent_id)?;
+                Ok(format!(
+                    "已创建 [目录] {} (id={})",
+                    created.file_name, created.file_id
+                ))
+            }),
+            "rename_file" => run_read_only(ctx, || {
+                let raw = args
+                    .get("file_id")
+                    .ok_or_else(|| Pan123Error::Operation("缺少参数 file_id".into()))?;
+                let id = id_argument(raw, "file_id").map_err(Pan123Error::Operation)?;
+                let new_name = args
+                    .get("new_name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| Pan123Error::Operation("缺少参数 new_name".into()))?;
+                self.client.rename_file(id, new_name)?;
+                Ok(format!("已把 id={id} 重命名为 {new_name}"))
+            }),
+            "move_files" => run_read_only(ctx, || {
+                let ids = ids_argument(
+                    args.get("file_ids")
+                        .ok_or_else(|| Pan123Error::Operation("缺少参数 file_ids".into()))?,
+                    "file_ids",
+                )
+                .map_err(Pan123Error::Operation)?;
+                let target = id_argument(
+                    args.get("target_parent_id").ok_or_else(|| {
+                        Pan123Error::Operation("缺少参数 target_parent_id".into())
+                    })?,
+                    "target_parent_id",
+                )
+                .map_err(Pan123Error::Operation)?;
+                self.client.move_files(&ids, target)?;
+                Ok(format!("已移动 {} 项到 id={target}", ids.len()))
+            }),
+            "copy_files" => run_read_only(ctx, || {
+                let ids = ids_argument(
+                    args.get("file_ids")
+                        .ok_or_else(|| Pan123Error::Operation("缺少参数 file_ids".into()))?,
+                    "file_ids",
+                )
+                .map_err(Pan123Error::Operation)?;
+                let target = id_argument(
+                    args.get("target_parent_id").ok_or_else(|| {
+                        Pan123Error::Operation("缺少参数 target_parent_id".into())
+                    })?,
+                    "target_parent_id",
+                )
+                .map_err(Pan123Error::Operation)?;
+                self.client.copy_files(&ids, target)?;
+                Ok(format!("已复制 {} 项到 id={target}", ids.len()))
+            }),
+            "delete_files" => run_read_only(ctx, || {
+                let ids = ids_argument(
+                    args.get("file_ids")
+                        .ok_or_else(|| Pan123Error::Operation("缺少参数 file_ids".into()))?,
+                    "file_ids",
+                )
+                .map_err(Pan123Error::Operation)?;
+                self.client.delete_files(&ids)?;
+                Ok(format!("已删除 {} 项", ids.len()))
+            }),
+            "get_download_url" => run_read_only(ctx, || {
+                let ids = ids_argument(
+                    args.get("file_ids")
+                        .ok_or_else(|| Pan123Error::Operation("缺少参数 file_ids".into()))?,
+                    "file_ids",
+                )
+                .map_err(Pan123Error::Operation)?;
+                let link = self.client.get_download_link(&ids)?;
+                Ok(format!("文件名：{}\n下载直链：{}", link.filename, link.url))
+            }),
+            "download_files" => {
+                let prepared = (|| -> Result<(Vec<u64>, PathBuf), Pan123Error> {
+                    let ids = ids_argument(
+                        args.get("file_ids")
+                            .ok_or_else(|| Pan123Error::Operation("缺少参数 file_ids".into()))?,
+                        "file_ids",
+                    )
+                    .map_err(Pan123Error::Operation)?;
+                    let raw = args
+                        .get("dest_dir")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            Pan123Error::Operation("缺少参数 dest_dir（必须为绝对路径）".into())
+                        })?;
+                    let dir =
+                        absolute_local_path(raw, "dest_dir").map_err(Pan123Error::Operation)?;
+                    Ok((ids, dir))
+                })();
+                match prepared {
+                    Err(err) => ToolCallOutcome {
+                        text: explain_error(&err),
+                        is_error: true,
+                    },
+                    Ok((ids, dir)) => {
+                        let options = DownloadOptions {
+                            transfer: owned_transfer_options(ctx, retry_policy_from(args)),
+                            resume: true,
+                        };
+                        let callback = transfer_callback(ctx);
+                        match self
+                            .client
+                            .download_files_with(&ids, &dir, options, Some(callback))
+                        {
+                            Ok(file) => ToolCallOutcome {
+                                text: format!(
+                                    "已下载到 {}（{} 字节）",
+                                    file.file_path.display(),
+                                    file.size
+                                ),
+                                is_error: false,
+                            },
+                            Err(err) => ToolCallOutcome {
+                                text: explain_error(&err),
+                                is_error: true,
+                            },
+                        }
+                    }
+                }
+            }
+            "upload_file" | "upload_directory" => {
+                let is_directory = name == "upload_directory";
+                let prepared = (|| -> Result<(PathBuf, u64, DuplicateMode), Pan123Error> {
+                    let raw = args
+                        .get("local_path")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            Pan123Error::Operation("缺少参数 local_path（必须为绝对路径）".into())
+                        })?;
+                    let path =
+                        absolute_local_path(raw, "local_path").map_err(Pan123Error::Operation)?;
+                    let parent_id = match args.get("parent_id") {
+                        Some(value) => {
+                            id_argument(value, "parent_id").map_err(Pan123Error::Operation)?
+                        }
+                        None => 0,
+                    };
+                    let duplicate = duplicate_argument(args).map_err(Pan123Error::Operation)?;
+                    Ok((path, parent_id, duplicate))
+                })();
+                match prepared {
+                    Err(err) => ToolCallOutcome {
+                        text: explain_error(&err),
+                        is_error: true,
+                    },
+                    Ok((path, parent_id, duplicate)) => {
+                        if is_directory && !path.is_dir() {
+                            return ToolCallOutcome {
+                                text: format!("local_path 不是目录：{}", path.display()),
+                                is_error: true,
+                            };
+                        }
+                        if !is_directory && !path.is_file() {
+                            return ToolCallOutcome {
+                                text: format!("local_path 不是文件：{}", path.display()),
+                                is_error: true,
+                            };
+                        }
+                        let options = UploadOptions {
+                            transfer: owned_transfer_options(ctx, retry_policy_from(args)),
+                            resume: true,
+                        };
+                        let callback = transfer_callback(ctx);
+                        if is_directory {
+                            match self.client.upload_directory_with(
+                                &path,
+                                parent_id,
+                                duplicate,
+                                options,
+                                Some(callback),
+                            ) {
+                                Ok(report) => ToolCallOutcome {
+                                    text: format!(
+                                        "上传完成：成功 {} 个，失败 {} 个",
+                                        report.uploaded_count(),
+                                        report.failed_count()
+                                    ),
+                                    is_error: !report.is_complete_success(),
+                                },
+                                Err(err) => ToolCallOutcome {
+                                    text: explain_error(&err),
+                                    is_error: true,
+                                },
+                            }
+                        } else {
+                            match self.client.upload_file_with(
+                                &path,
+                                parent_id,
+                                duplicate,
+                                options,
+                                Some(callback),
+                            ) {
+                                Ok(info) => ToolCallOutcome {
+                                    text: format!(
+                                        "已上传 {} (id={})",
+                                        info.file_name, info.file_id
+                                    ),
+                                    is_error: false,
+                                },
+                                Err(err) => ToolCallOutcome {
+                                    text: explain_error(&err),
+                                    is_error: true,
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+            "list_upload_sessions" => run_read_only(ctx, || {
+                let clear = args.get("clear").and_then(Value::as_bool).unwrap_or(false);
+                if clear {
+                    let removed = pan123_sdk::upload_session::clear()?;
+                    return Ok(format!("已清空 {removed} 条上传会话记录。"));
+                }
+                let sessions = pan123_sdk::upload_session::list();
+                if sessions.is_empty() {
+                    return Ok("没有未完成的上传会话记录。".to_string());
+                }
+                Ok(format!("共 {} 条未完成上传会话", sessions.len()))
+            }),
+            "dir_tree" => run_read_only(ctx, || {
+                // depth 必须显式给出：本工具没有隐含的当前目录或默认深度。
+                let depth = args
+                    .get("depth")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| Pan123Error::Operation("必须显式提供参数 depth".into()))?;
+                let parent_id = match args.get("parent_id") {
+                    Some(value) => {
+                        id_argument(value, "parent_id").map_err(Pan123Error::Operation)?
+                    }
+                    None => 0,
+                };
+                let mut out = String::new();
+                self.render_tree(parent_id, 0, depth as usize, &mut out)?;
+                Ok(out)
+            }),
+            "find_files" => run_read_only(ctx, || {
+                let query = args
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| Pan123Error::Operation("缺少参数 query".into()))?;
+                let parent_id = match args.get("parent_id") {
+                    Some(value) => {
+                        id_argument(value, "parent_id").map_err(Pan123Error::Operation)?
+                    }
+                    None => 0,
+                };
+                let exact = args.get("exact").and_then(Value::as_bool).unwrap_or(false);
+                let dir_only = args
+                    .get("dir_only")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let file_only = args
+                    .get("file_only")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let mut matches = Vec::new();
+                self.collect_matches(parent_id, query, exact, dir_only, file_only, &mut matches)?;
+                if matches.is_empty() {
+                    return Ok(format!("没有匹配 {query:?} 的文件"));
+                }
+                Ok(format_file_list(&matches))
+            }),
             other => ToolCallOutcome {
                 text: format!("未知工具：{other}"),
                 is_error: true,
             },
         }
+    }
+}
+
+impl Pan123Tools {
+    fn render_tree(
+        &self,
+        parent_id: u64,
+        level: usize,
+        max_depth: usize,
+        out: &mut String,
+    ) -> Result<(), Pan123Error> {
+        if level >= max_depth {
+            return Ok(());
+        }
+        let items = self.client.get_file_list(parent_id, 1, 100)?;
+        for item in items {
+            out.push_str(&"  ".repeat(level));
+            if item.is_dir() {
+                out.push_str(&format!("[目录] {}\n", item.file_name));
+                self.render_tree(item.file_id, level + 1, max_depth, out)?;
+            } else {
+                out.push_str(&format!("[文件] {} ({} 字节)\n", item.file_name, item.size));
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_matches(
+        &self,
+        parent_id: u64,
+        query: &str,
+        exact: bool,
+        dir_only: bool,
+        file_only: bool,
+        out: &mut Vec<FileInfo>,
+    ) -> Result<(), Pan123Error> {
+        let items = self.client.get_file_list(parent_id, 1, 100)?;
+        for item in items {
+            let name_matches = if exact {
+                item.file_name == query
+            } else {
+                item.file_name.contains(query)
+            };
+            if name_matches {
+                let kind_ok = if dir_only {
+                    item.is_dir()
+                } else if file_only {
+                    !item.is_dir()
+                } else {
+                    true
+                };
+                if kind_ok {
+                    out.push(item.clone());
+                }
+            }
+            if item.is_dir() {
+                self.collect_matches(item.file_id, query, exact, dir_only, file_only, out)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -636,5 +1042,93 @@ mod tests {
         let outcome = tools.call("get_file_info", &j!({ "file_ids": ["abc"] }), &ctx);
         assert!(outcome.is_error);
         assert!(outcome.text.contains("file_ids"), "实际：{}", outcome.text);
+    }
+
+    #[test]
+    fn absolute_local_path_accepts_absolute() {
+        // CI 的 windows-latest 也会跑本用例："/tmp/x" 在 Windows 上不是绝对路径
+        //（Path::is_absolute 需要盘符前缀），故按平台取各自的绝对路径样本。
+        let raw = if cfg!(windows) { r"C:\tmp\x" } else { "/tmp/x" };
+        let path = absolute_local_path(raw, "local_path").unwrap();
+        assert!(path.is_absolute());
+    }
+
+    #[test]
+    fn absolute_local_path_rejects_relative() {
+        let err = absolute_local_path("relative/x", "local_path").unwrap_err();
+        assert!(err.contains("local_path"), "实际：{err}");
+        assert!(err.contains("绝对路径"), "实际：{err}");
+    }
+
+    #[test]
+    fn absolute_local_path_rejects_parent_traversal() {
+        let err = absolute_local_path("/tmp/../../etc/passwd", "dest_dir").unwrap_err();
+        assert!(err.contains("dest_dir"), "实际：{err}");
+    }
+
+    #[test]
+    fn duplicate_parsing_defaults_to_keep_both() {
+        assert_eq!(
+            duplicate_argument(&j!({})).unwrap(),
+            DuplicateMode::KeepBoth
+        );
+        assert_eq!(
+            duplicate_argument(&j!({ "duplicate": "overwrite" })).unwrap(),
+            DuplicateMode::Overwrite
+        );
+        assert_eq!(
+            duplicate_argument(&j!({ "duplicate": "cancel" })).unwrap(),
+            DuplicateMode::Cancel
+        );
+        assert!(duplicate_argument(&j!({ "duplicate": "nonsense" })).is_err());
+    }
+
+    #[test]
+    fn write_tools_are_dispatched_not_reported_unknown() {
+        // 一律传空参数：每个工具都会在参数校验阶段就失败，因此不会发出任何网络请求。
+        // 未接线的工具返回“未知工具”，已接线的会返回它自己的参数错误。
+        let tools = Pan123Tools {
+            client: test_client(),
+        };
+        let ctx = crate::mcp::protocol::CallContext {
+            progress: crate::mcp::protocol::ProgressSink::discarding(),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        for name in [
+            "create_folder",
+            "rename_file",
+            "delete_files",
+            "move_files",
+            "copy_files",
+            "get_download_url",
+            "list_upload_sessions",
+            "find_files",
+            "dir_tree",
+        ] {
+            let outcome = tools.call(name, &j!({}), &ctx);
+            assert!(
+                !outcome.text.contains("未知工具"),
+                "{name} 未接线，实际返回：{}",
+                outcome.text
+            );
+        }
+    }
+
+    #[test]
+    fn upload_rejects_relative_path_before_touching_network() {
+        let tools = Pan123Tools {
+            client: test_client(),
+        };
+        let ctx = crate::mcp::protocol::CallContext {
+            progress: crate::mcp::protocol::ProgressSink::discarding(),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let outcome = tools.call("upload_file", &j!({ "local_path": "rel.txt" }), &ctx);
+        assert!(outcome.is_error);
+        assert!(
+            outcome.text.contains("local_path"),
+            "实际：{}",
+            outcome.text
+        );
     }
 }
