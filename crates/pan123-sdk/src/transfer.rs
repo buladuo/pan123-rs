@@ -276,7 +276,7 @@ pub fn copy_stream_cancellable<R: Read, W: Write>(
     cancel: Option<&CancelToken>,
     mut on_chunk: impl FnMut(u64),
 ) -> crate::Result<u64> {
-    let mut buffer = vec![0u8; 64 * 1024];
+    let mut buffer = vec![0u8; 256 * 1024];
     let mut written: u64 = 0;
     loop {
         if let Some(token) = cancel {
@@ -325,11 +325,11 @@ mod cancel_tests {
 
     #[test]
     fn stops_midway_when_cancelled_during_copy() {
-        // 输入 256 KiB、内部缓冲 64 KiB：第一块读满后回调置位取消令牌，
+        // 输入 1 MiB、内部缓冲 256 KiB：第一块读满后回调置位取消令牌，
         // 第二块开始前必须检出并停止，因此写入量应远小于总和。
         let token: CancelToken = Arc::new(AtomicBool::new(false));
         let token_for_cb = Arc::clone(&token);
-        let mut reader = Cursor::new(vec![7u8; 256 * 1024]);
+        let mut reader = Cursor::new(vec![7u8; 1024 * 1024]);
         let mut writer = Vec::new();
         let err = copy_stream_cancellable(&mut reader, &mut writer, Some(&token), move |total| {
             if total >= 1024 {
@@ -339,7 +339,7 @@ mod cancel_tests {
         .expect_err("should be cancelled midway");
         assert!(matches!(err, crate::Pan123Error::Cancelled));
         assert!(
-            writer.len() < 256 * 1024,
+            writer.len() < 1024 * 1024,
             "应提前停止，实际写入 {}",
             writer.len()
         );
