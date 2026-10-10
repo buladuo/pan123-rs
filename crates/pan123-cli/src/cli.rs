@@ -80,12 +80,18 @@ enum Command {
         parent: Option<String>,
         #[arg(short, long, default_value_t = 100)]
         limit: u32,
+        /// 以 JSON 输出，便于程序化解析。
+        #[arg(long)]
+        json: bool,
     },
     Tree {
         #[arg(short, long)]
         parent: Option<String>,
         #[arg(short, long, default_value_t = 3)]
         depth: usize,
+        /// 以 JSON 输出，便于程序化解析。
+        #[arg(long)]
+        json: bool,
     },
     Upload {
         local_path: PathBuf,
@@ -147,6 +153,9 @@ enum Command {
         dir_only: bool,
         #[arg(long)]
         file_only: bool,
+        /// 以 JSON 输出，便于程序化解析。
+        #[arg(long)]
+        json: bool,
     },
     Refresh {
         #[arg(long)]
@@ -254,7 +263,11 @@ impl Pan123Cli {
                 );
                 Ok(())
             }
-            Command::Ls { parent, limit } => {
+            Command::Ls {
+                parent,
+                limit,
+                json,
+            } => {
                 self.ensure_auth()?;
                 let cwd = config::load_cwd();
                 let parent_id = match parent {
@@ -262,18 +275,42 @@ impl Pan123Cli {
                     None => cwd.file_id,
                 };
                 let items = self.client()?.get_file_list(parent_id, 1, limit)?;
-                self.print_ls(&items);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&items)?);
+                } else {
+                    self.print_ls(&items);
+                }
                 Ok(())
             }
-            Command::Tree { parent, depth } => {
+            Command::Tree {
+                parent,
+                depth,
+                json,
+            } => {
                 self.ensure_auth()?;
                 let cwd = config::load_cwd();
                 let resolved = match parent {
                     Some(target) => self.resolve_directory_ref(&cwd, &target)?,
                     None => cwd,
                 };
-                println!("{}", resolved.path.bright_blue().bold());
-                self.print_tree(resolved.file_id, String::new(), 1, depth)?;
+                if json {
+                    let mut entries = Vec::new();
+                    self.collect_tree(
+                        resolved.file_id,
+                        resolved.path.clone(),
+                        1,
+                        depth,
+                        &mut entries,
+                    )?;
+                    let entries: Vec<serde_json::Value> = entries
+                        .iter()
+                        .map(|entry| serde_json::json!({ "path": entry.path, "item": entry.item }))
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&entries)?);
+                } else {
+                    println!("{}", resolved.path.bright_blue().bold());
+                    self.print_tree(resolved.file_id, String::new(), 1, depth)?;
+                }
                 Ok(())
             }
             Command::Upload {
@@ -469,6 +506,7 @@ impl Pan123Cli {
                 exact,
                 dir_only,
                 file_only,
+                json,
             } => {
                 self.ensure_auth()?;
                 let cwd = config::load_cwd();
@@ -487,7 +525,15 @@ impl Pan123Cli {
                     file_only,
                     &mut results,
                 )?;
-                self.print_find_results(&results);
+                if json {
+                    let values: Vec<serde_json::Value> = results
+                        .iter()
+                        .map(|entry| serde_json::json!({ "path": entry.path, "item": entry.item }))
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&values)?);
+                } else {
+                    self.print_find_results(&results);
+                }
                 Ok(())
             }
             Command::Refresh { all } => {
@@ -1080,6 +1126,33 @@ impl Pan123Cli {
             if item.is_dir() && depth < max_depth {
                 let next_prefix = format!("{}{}", prefix, if is_last { "  " } else { "│ " });
                 self.print_tree(item.file_id, next_prefix, depth + 1, max_depth)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_tree(
+        &self,
+        parent_id: u64,
+        prefix: String,
+        level: usize,
+        max_depth: usize,
+        out: &mut Vec<FileInfoWithPath>,
+    ) -> Result<()> {
+        if level > max_depth {
+            return Ok(());
+        }
+        let items = self.client()?.get_file_list(parent_id, 1, 100)?;
+        for item in items {
+            let path = format!("{}/{}", prefix.trim_end_matches('/'), item.file_name);
+            let is_dir = item.is_dir();
+            let file_id = item.file_id;
+            out.push(FileInfoWithPath {
+                path: path.clone(),
+                item,
+            });
+            if is_dir && level < max_depth {
+                self.collect_tree(file_id, path, level + 1, max_depth, out)?;
             }
         }
         Ok(())
