@@ -49,6 +49,8 @@ Token 来源优先级：环境变量 `PAN123_TOKEN` > 系统密钥环 > 本地�
 
 `<ref>` 可以是文件/目录名、路径或 file_id，由 CLI 自行解析（**CLI 是有状态的**，依赖 `pan123 cd` 设过的当前目录）。
 
+CLI 的根目录写成 `/`（不是 `0`）：数字一律按真实 file_id 解析，`--parent 0` 会被当成「查找 id=0 的文件」并报找不到。`parent_id = 0` 是 MCP 工具的说法，别和 CLI 的目录引用混用。
+
 注意 `mv` / `cp` 的**目标目录是第一个位置参数**（没有 `--parent` 标志）：`pan123 mv <目标目录> <ref...>`。
 
 `--duplicate` 取值：`keep-both`（默认）/ `overwrite` / `cancel`。
@@ -58,7 +60,7 @@ Token 来源优先级：环境变量 `PAN123_TOKEN` > 系统密钥环 > 本地�
 ### 备份目录到云盘
 
 ```bash
-pan123 mkdir 备份 --parent 0          # 若不存在
+pan123 mkdir 备份 --parent /          # 若不存在
 pan123 upload /绝对/路径/项目 --parent 备份 --duplicate keep-both --retries 5
 ```
 
