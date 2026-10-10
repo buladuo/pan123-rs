@@ -1,5 +1,6 @@
 mod cli;
 mod icons;
+mod mcp;
 
 use cli::Pan123Cli;
 
