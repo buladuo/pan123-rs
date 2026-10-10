@@ -3580,9 +3580,12 @@ Token 来源优先级：环境变量 `PAN123_TOKEN` > 系统密钥环 > 本地�
 ### 备份目录到云盘
 
 ```bash
-pan123 mkdir 备份 --parent 0          # 若不存在
+pan123 mkdir 备份 --parent /          # 若不存在；CLI 的根目录写作 /（不是 0）
 pan123 upload /绝对/路径/项目 --parent 备份 --duplicate keep-both --retries 5
 ```
+
+注意 CLI 与 MCP 对「根目录」的写法不同：CLI 用 `/`，`--parent 0` 会被当成
+file_id 为 0 的真实查找并报 `NotFound`；MCP 工具才是 `parent_id = 0`。
 
 上传耗时较长。退出码为 0 表示成功；非 0 时读 stderr 判断失败原因。
 
