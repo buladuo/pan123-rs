@@ -33,8 +33,9 @@ use crate::models::{
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::signature;
 use crate::transfer::{
-    DownloadOptions, ProgressCallback, RetryPolicy, TransferEvent, TransferFailure, TransferKind,
-    TransferOptions, UploadDirectoryReport, UploadFailureKind, UploadOptions,
+    CancelToken, CancelTokenExt, DownloadOptions, ProgressCallback, RetryPolicy, TransferEvent,
+    TransferFailure, TransferKind, TransferOptions, UploadDirectoryReport, UploadFailureKind,
+    UploadOptions,
 };
 use crate::upload_session::{self, UploadSession};
 
@@ -596,7 +597,7 @@ impl Pan123Client {
                 downloaded += crate::transfer::copy_stream_cancellable(
                     &mut response,
                     &mut output,
-                    None::<&crate::transfer::CancelToken>, // Task 3 接入 options.transfer.cancel
+                    options.transfer.cancel.as_ref(),
                     |written| {
                         let absolute = written + start_offset;
                         if absolute % (1024 * 1024) == 0 {
@@ -714,6 +715,7 @@ impl Pan123Client {
         // Started 事件会在 upload_file_inner 中 MD5 计算完成后发送
         // 避免进度条在 MD5 计算期间频繁刷新
 
+        let cancel = options.transfer.cancel.clone();
         let result = self.upload_file_inner(
             &file_path,
             parent_id,
@@ -723,6 +725,7 @@ impl Pan123Client {
             &transfer_id,
             options.transfer.parallelism,
             options.resume,
+            cancel,
         );
         match result {
             Ok(file) => {
@@ -786,6 +789,7 @@ impl Pan123Client {
         transfer_id: &str,
         parallelism: usize,
         resume: bool,
+        cancel: Option<CancelToken>,
     ) -> Result<FileInfo> {
         let metadata = fs::metadata(file_path)?;
         if !metadata.is_file() {
@@ -1002,6 +1006,7 @@ impl Pan123Client {
             let upload_id = upload_id.clone();
             let storage_node = storage_node.clone();
             let progress = progress.clone();
+            let cancel = cancel.clone();
             let transfer_id = transfer_id.to_string();
             let file_path_clone = Arc::clone(&file_path_arc);
 
@@ -1027,6 +1032,13 @@ impl Pan123Client {
                         let Some(part_number) = part_number else {
                             break;
                         };
+
+                        if let Some(token) = cancel.as_ref()
+                            && token.check().is_err()
+                        {
+                            let _ = tx.send((part_number, Err(Pan123Error::Cancelled)));
+                            break;
+                        }
 
                         let offset = (part_number - 1) * slice_size;
                         if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)) {
@@ -1128,6 +1140,14 @@ impl Pan123Client {
         drop(tx);
 
         for (part_number, result) in rx {
+            if let Some(token) = cancel.as_ref()
+                && token.check().is_err()
+            {
+                for handle in handles.drain(..) {
+                    let _ = handle.join();
+                }
+                return Err(Pan123Error::Cancelled);
+            }
             match result {
                 Ok(bytes) => {
                     let current_uploaded = {
@@ -1363,6 +1383,8 @@ impl Pan123Client {
         let mut handles = Vec::new();
 
         for _ in 0..parallelism {
+            // UploadOptions 已不再是 Copy，闭包按值捕获，需每轮克隆一份。
+            let options = options.clone();
             let queue = Arc::clone(&queue);
             let tx = tx.clone();
             let client = self.clone();
@@ -1382,7 +1404,7 @@ impl Pan123Client {
                             &path,
                             remote_parent,
                             duplicate,
-                            options,
+                            options.clone(),
                             progress.clone(),
                         );
                         if tx.send((path, result)).is_err() {

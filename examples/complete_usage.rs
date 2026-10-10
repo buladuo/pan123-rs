@@ -82,6 +82,7 @@ fn main() -> Result<()> {
                 exponential_backoff: true,
                 jitter: true,
             },
+            cancel: None,
         },
     };
 
@@ -116,6 +117,7 @@ fn main() -> Result<()> {
         transfer: TransferOptions {
             parallelism: 3,
             retry: RetryPolicy::default(),
+            cancel: None,
         },
     };
 

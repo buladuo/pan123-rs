@@ -79,10 +79,12 @@ impl RetryPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct TransferOptions {
     pub parallelism: usize,
     pub retry: RetryPolicy,
+    /// 取消令牌。`None` 表示不可取消（CLI 现有行为）。
+    pub cancel: Option<CancelToken>,
 }
 
 impl Default for TransferOptions {
@@ -90,12 +92,13 @@ impl Default for TransferOptions {
         Self {
             parallelism: 1, // Web端不支持并发，使用顺序上传
             retry: RetryPolicy::default(),
+            cancel: None,
         }
     }
 }
 
 /// 上传选项。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct UploadOptions {
     pub transfer: TransferOptions,
     /// 是否启用「跨会话断点续传」。
@@ -121,7 +124,7 @@ impl Default for UploadOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct DownloadOptions {
     pub transfer: TransferOptions,
     pub resume: bool,
@@ -344,5 +347,39 @@ mod cancel_tests {
             writer.len()
         );
         assert!(!writer.is_empty(), "取消前应至少完成一个分块");
+    }
+
+    #[test]
+    fn transfer_options_default_has_no_cancel_token() {
+        assert!(TransferOptions::default().cancel.is_none());
+    }
+
+    #[test]
+    fn transfer_options_carries_cancel_token() {
+        let token: CancelToken = Arc::new(AtomicBool::new(false));
+        let options = TransferOptions {
+            cancel: Some(Arc::clone(&token)),
+            ..Default::default()
+        };
+        assert!(Arc::ptr_eq(options.cancel.as_ref().unwrap(), &token));
+    }
+
+    #[test]
+    fn upload_and_download_options_propagate_cancel() {
+        let token: CancelToken = Arc::new(AtomicBool::new(false));
+        let transfer = TransferOptions {
+            cancel: Some(Arc::clone(&token)),
+            ..Default::default()
+        };
+        let upload = UploadOptions {
+            transfer: transfer.clone(),
+            resume: true,
+        };
+        let download = DownloadOptions {
+            transfer,
+            resume: true,
+        };
+        assert!(upload.transfer.cancel.is_some());
+        assert!(download.transfer.cancel.is_some());
     }
 }
