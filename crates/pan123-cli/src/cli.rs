@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table, presets};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use owo_colors::OwoColorize;
@@ -211,6 +211,14 @@ fn init_color_enabled(no_color_flag: bool) {
     COLOR_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
+/// 单向关闭颜色开关。
+///
+/// 用于交互式 shell 中某一行显式带了 `--no-color` 的情形：只允许关、不允许开——
+/// 若在这里按行值重新初始化，后续不带该参数的行就会把启动时的选择重置掉。
+fn disable_color() {
+    COLOR_ENABLED.store(false, Ordering::Relaxed);
+}
+
 /// 非 TTY 或显式 --no-color 时返回不施加任何颜色效果的字符串。
 #[derive(Clone, Copy)]
 struct Paint<'a>(&'a str);
@@ -316,7 +324,19 @@ pub struct Pan123Cli {
 
 impl Pan123Cli {
     pub fn run_from_env() -> Result<()> {
-        let args = CliArgs::parse();
+        // clap 的 --help 与用法错误由 anstream 自行判断 TTY 着色，而这段输出发生在
+        // parse() 期间——那时我们的开关还没建立。所以先扫一遍原始参数，把「不要颜色」
+        // 这个决定在解析前交给 clap 自己，否则 `pan123 --no-color --help` 在终端里
+        // 仍然是彩色的。
+        let no_color_requested = std::env::args_os().any(|arg| arg.as_os_str() == "--no-color");
+        let matches = CliArgs::command()
+            .color(if no_color_requested {
+                clap::ColorChoice::Never
+            } else {
+                clap::ColorChoice::Auto
+            })
+            .get_matches();
+        let args = CliArgs::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
         init_color_enabled(args.no_color);
         let mut cli = Self {
             client: None,
@@ -800,6 +820,10 @@ impl Pan123Cli {
                         .collect::<Vec<_>>();
                     match CliArgs::try_parse_from(argv) {
                         Ok(parsed) => {
+                            // 本行显式带了 --no-color 时单向关闭，之后不会再被打开。
+                            if parsed.no_color {
+                                disable_color();
+                            }
                             if let Some(command) = parsed.command
                                 && let Err(err) = self.execute(command)
                             {
