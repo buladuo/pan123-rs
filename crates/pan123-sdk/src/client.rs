@@ -6,15 +6,17 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
-use md5::Context;
+use md5::Context as Md5Context;
 use qrcode::QrCode;
 use qrcode::render::unicode;
 use rand::Rng;
+use reqwest::Method;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderMap, HeaderValue, USER_AGENT};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
 use walkdir::WalkDir;
@@ -24,17 +26,26 @@ use crate::error::{Pan123Error, Result};
 use crate::models::{
     ApiEnvelope, CopyTaskCreateData, CopyTaskStatusData, DispatchItem, DomainData,
     DownloadInfoData, DownloadLink, DownloadResumeMeta, DownloadedFile, DuplicateMode, FileInfo,
-    FileInfoListData, FileListData, PresignedUrlsData, QrGenerateData, QrResultData, SignInData,
-    TrafficCheckData, UploadCompleteData, UploadRequestData, UserInfo, WxCodeData,
+    FileInfoListData, FileListData, ListPartsData, PresignedUrlsData, QrGenerateData, QrResultData,
+    SignInData, TrafficCheckData, UploadCompleteData, UploadRequestData, UploadedPart, UserInfo,
+    WxCodeData,
 };
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
+use crate::signature;
 use crate::transfer::{
     DownloadOptions, ProgressCallback, RetryPolicy, TransferEvent, TransferFailure, TransferKind,
     TransferOptions, UploadDirectoryReport, UploadFailureKind, UploadOptions,
 };
+use crate::upload_session::{self, UploadSession};
 
+/// 业务接口域名（`/b/api/*`）。前端生产配置：`prod.interface`。
 const DEFAULT_BASE_URL: &str = "https://api.123278.com";
-const DEFAULT_UCENTER_URL: &str = "https://login.123pan.com";
+/// 用户中心（登录）域名。前端生产配置：`prod.login`（旧值 login.123pan.com 已迁移）。
+const DEFAULT_UCENTER_URL: &str = "https://user.123pan.cn";
+/// 服务端时间接口，用于动态签名的时间基准。
+const SERVER_TIME_PATH: &str = "/b/api/get/server/time";
+/// 签名失效错误码。
+const DYKEY_ERROR_CODE: i64 = -3;
 
 #[derive(Debug, Clone)]
 pub enum TokenCheckStatus {
@@ -52,6 +63,8 @@ pub struct Pan123Client {
     login_uuid: String,
     token: Option<String>,
     rate_limiter: Option<RateLimiter>,
+    /// 缓存的服务端时间戳（秒），用于动态签名。
+    server_timestamp: Arc<Mutex<Option<i64>>>,
 }
 
 impl Pan123Client {
@@ -63,7 +76,12 @@ impl Pan123Client {
         token: Option<String>,
         rate_limiter_config: Option<RateLimiterConfig>,
     ) -> Result<Self> {
-        let login_uuid = format!("{:x}", md5::compute(Uuid::new_v4().to_string()));
+        // 前端实际的 LoginUuid 为 64 位十六进制（SHA-256），此处保持一致。
+        let login_uuid = {
+            let mut hasher = Sha256::new();
+            hasher.update(Uuid::new_v4().to_string().as_bytes());
+            format!("{:x}", hasher.finalize())
+        };
 
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0"));
@@ -108,9 +126,12 @@ impl Pan123Client {
             login_uuid,
             token: token.or_else(config::load_token),
             rate_limiter,
+            server_timestamp: Arc::new(Mutex::new(None)),
         };
 
         instance.init_domains()?;
+        // 动态签名需要服务端时间基准；失败不致命，后续请求会退化到本地时间。
+        let _ = instance.refresh_server_time();
         Ok(instance)
     }
 
@@ -148,12 +169,15 @@ impl Pan123Client {
     pub fn login_by_qrcode(&mut self) -> Result<()> {
         let url = format!("{}/api/user/qr-code/generate", self.ucenter_url);
         let res: ApiEnvelope<QrGenerateData> =
-            self.send_json(self.client.get(url), None::<Value>)?;
+            self.send_json(Method::GET, &url, &[], None::<Value>)?;
         let data = self.unwrap_data(res)?;
-        let scan_url = format!(
-            "https://www.123pan.com/wx-app-login.html?env=production&uniID={}&source=123pan&type=login",
-            data.uni_id
-        );
+        // 新版接口直接返回扫码地址（`url` 字段），优先采用；旧版仅返回 uniID 时回退到固定地址。
+        let scan_url = data.scan_url().unwrap_or_else(|| {
+            format!(
+                "https://www.123pan.com/wx-app-login.html?env=production&uniID={}&source=123pan&type=login",
+                data.uni_id
+            )
+        });
 
         self.print_qr_code(&scan_url)?;
         self.poll_qr_result(&data.uni_id)
@@ -161,10 +185,8 @@ impl Pan123Client {
 
     pub fn get_user_info(&self) -> Result<UserInfo> {
         let url = format!("{}/b/api/restful/goapi/v1/user/report/info", self.domain());
-        let res: ApiEnvelope<UserInfo> = self.send_json(
-            self.client.get(url).query(&self.dynamic_params()),
-            None::<Value>,
-        )?;
+        let res: ApiEnvelope<UserInfo> =
+            self.send_json(Method::GET, &url, &[], None::<Value>)?;
         self.unwrap_data(res)
     }
 
@@ -173,16 +195,15 @@ impl Pan123Client {
         let payload = json!({
             "fileIdList": file_ids.iter().map(|id| json!({"fileId": id})).collect::<Vec<_>>()
         });
-        let res: ApiEnvelope<FileInfoListData> = self.send_json(
-            self.client.post(url).query(&self.dynamic_params()),
-            Some(payload),
-        )?;
+        let res: ApiEnvelope<FileInfoListData> =
+            self.send_json(Method::POST, &url, &[], Some(payload))?;
         Ok(self.unwrap_data(res)?.info_list)
     }
 
     pub fn get_file_list(&self, parent_id: u64, page: u32, limit: u32) -> Result<Vec<FileInfo>> {
         let url = format!("{}/b/api/file/list/new", self.domain());
-        let mut params = HashMap::from([
+        // 参数与 web 端 `file/list/new` 保持一致（web 会显式携带以下默认值）。
+        let params = vec![
             ("driveId".to_string(), "0".to_string()),
             ("limit".to_string(), limit.to_string()),
             ("next".to_string(), "0".to_string()),
@@ -190,12 +211,16 @@ impl Pan123Client {
             ("orderDirection".to_string(), "desc".to_string()),
             ("parentFileId".to_string(), parent_id.to_string()),
             ("trashed".to_string(), "false".to_string()),
+            ("SearchData".to_string(), String::new()),
             ("Page".to_string(), page.to_string()),
+            ("OnlyLookAbnormalFile".to_string(), "0".to_string()),
             ("operateType".to_string(), "1".to_string()),
-        ]);
-        params.extend(self.dynamic_params());
+            ("inDirectSpace".to_string(), "false".to_string()),
+            ("fileCategory".to_string(), "0".to_string()),
+            ("isSearchOrder".to_string(), "false".to_string()),
+        ];
         let res: ApiEnvelope<FileListData> =
-            self.send_json(self.client.get(url).query(&params), None::<Value>)?;
+            self.send_json(Method::GET, &url, &params, None::<Value>)?;
         Ok(self.unwrap_data(res)?.info_list)
     }
 
@@ -208,10 +233,8 @@ impl Pan123Client {
             "duplicate": 1,
             "RequestSource": Value::Null
         });
-        let res: ApiEnvelope<Value> = self.send_json(
-            self.client.post(url).query(&self.dynamic_params()),
-            Some(payload),
-        )?;
+        let res: ApiEnvelope<Value> =
+            self.send_json(Method::POST, &url, &[], Some(payload))?;
         self.ensure_ok(res)
     }
 
@@ -224,10 +247,8 @@ impl Pan123Client {
             "operatePlace": "bottom",
             "RequestSource": Value::Null
         });
-        let res: ApiEnvelope<Value> = self.send_json(
-            self.client.post(url).query(&self.dynamic_params()),
-            Some(payload),
-        )?;
+        let res: ApiEnvelope<Value> =
+            self.send_json(Method::POST, &url, &[], Some(payload))?;
         self.ensure_ok(res)
     }
 
@@ -249,10 +270,8 @@ impl Pan123Client {
             "RequestSource": Value::Null,
             "safeBox": false
         });
-        let res: ApiEnvelope<Value> = self.send_json(
-            self.client.post(url).query(&self.dynamic_params()),
-            Some(payload),
-        )?;
+        let res: ApiEnvelope<Value> =
+            self.send_json(Method::POST, &url, &[], Some(payload))?;
         self.ensure_ok(res)
     }
 
@@ -278,10 +297,8 @@ impl Pan123Client {
         });
 
         let url = format!("{}/b/api/restful/goapi/v1/file/copy/async", self.domain());
-        let res: ApiEnvelope<CopyTaskCreateData> = self.send_json(
-            self.client.post(url).query(&self.dynamic_params()),
-            Some(payload),
-        )?;
+        let res: ApiEnvelope<CopyTaskCreateData> =
+            self.send_json(Method::POST, &url, &[], Some(payload))?;
         let task_id = self
             .unwrap_data(res)?
             .task_id
@@ -289,10 +306,9 @@ impl Pan123Client {
 
         let task_url = format!("{}/b/api/restful/goapi/v1/file/copy/task", self.domain());
         for _ in 0..30 {
-            let mut params = HashMap::from([("taskId".to_string(), task_id.clone())]);
-            params.extend(self.dynamic_params());
+            let params = vec![("taskId".to_string(), task_id.clone())];
             let status_res: ApiEnvelope<CopyTaskStatusData> =
-                self.send_json(self.client.get(&task_url).query(&params), None::<Value>)?;
+                self.send_json(Method::GET, &task_url, &params, None::<Value>)?;
             let status = self.unwrap_data(status_res)?.status.unwrap_or_default();
             if status == 2 {
                 return Ok(());
@@ -316,10 +332,8 @@ impl Pan123Client {
             "NotReuse": true,
             "RequestSource": Value::Null
         });
-        let res: ApiEnvelope<Value> = self.send_json(
-            self.client.post(url).query(&self.dynamic_params()),
-            Some(payload),
-        )?;
+        let res: ApiEnvelope<Value> =
+            self.send_json(Method::POST, &url, &[], Some(payload))?;
         let data = self.unwrap_data(res)?;
         let info = data.get("Info").ok_or_else(|| {
             Pan123Error::Operation("folder info missing from create response".into())
@@ -369,10 +383,8 @@ impl Pan123Client {
             )
         };
 
-        let res: ApiEnvelope<DownloadInfoData> = self.send_json(
-            self.client.post(url).query(&self.dynamic_params()),
-            Some(payload),
-        )?;
+        let res: ApiEnvelope<DownloadInfoData> =
+            self.send_json(Method::POST, &url, &[], Some(payload))?;
         let data = self.unwrap_data(res)?;
         let dispatch = data
             .dispatch_list
@@ -687,6 +699,7 @@ impl Pan123Client {
                     retry: retry_policy,
                     ..Default::default()
                 },
+                ..Default::default()
             },
             None,
         )
@@ -715,6 +728,7 @@ impl Pan123Client {
             progress.clone(),
             &transfer_id,
             options.transfer.parallelism,
+            options.resume,
         );
         match result {
             Ok(file) => {
@@ -744,6 +758,29 @@ impl Pan123Client {
         }
     }
 
+    /// 查询对象存储上**已经成功上传**的分片，用于断点续传。
+    ///
+    /// 对应 web 端 `file/s3_list_upload_parts`。仅在多分片场景下有意义；
+    /// 返回的 `PartNumber` 为 1 起始。调用失败时由上层决定是否降级为「全量重传」。
+    pub fn list_upload_parts(
+        &self,
+        bucket: &str,
+        key: &str,
+        upload_id: &str,
+        storage_node: &str,
+    ) -> Result<Vec<UploadedPart>> {
+        let url = format!("{}/b/api/file/s3_list_upload_parts", self.domain());
+        let payload = json!({
+            "bucket": bucket,
+            "key": key,
+            "uploadId": upload_id,
+            "StorageNode": storage_node
+        });
+        let res: ApiEnvelope<ListPartsData> =
+            self.send_json(Method::POST, &url, &[], Some(payload))?;
+        Ok(self.unwrap_data(res)?.parts)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn upload_file_inner(
         &self,
@@ -754,6 +791,7 @@ impl Pan123Client {
         progress: Option<ProgressCallback>,
         transfer_id: &str,
         parallelism: usize,
+        resume: bool,
     ) -> Result<FileInfo> {
         let metadata = fs::metadata(file_path)?;
         if !metadata.is_file() {
@@ -785,6 +823,23 @@ impl Pan123Client {
             },
         );
 
+        // 跨会话恢复：查找本地上次未完成上传留下的会话记录。
+        // 命中后既用于「响应缺字段时兜底」，也用于「提示用户正在续传」。
+        // 磁盘上的记录由 `upload_request` 成功后立即写入，因此进程被 kill / 断电
+        // 这类无法执行清理回调的场景同样能恢复。
+        let saved_session = if resume {
+            upload_session::load_for_file(&md5_hash, parent_id, &file_name, file_size)
+        } else {
+            None
+        };
+        if let Some(session) = &saved_session {
+            let shown: String = session.upload_id.chars().take(8).collect();
+            eprintln!(
+                "检测到未完成的上传会话（uploadId {shown}…，保存于 {} 天前），尝试断点续传…",
+                (upload_session::now_millis() - session.saved_at) / (24 * 60 * 60 * 1000)
+            );
+        }
+
         let request_url = format!("{}/b/api/file/upload_request", self.domain());
         let mut payload = json!({
             "driveId": 0,
@@ -802,10 +857,7 @@ impl Pan123Client {
             TransferKind::Upload,
             &progress,
             |_, _| {
-                self.send_json(
-                    self.client.post(&request_url).query(&self.dynamic_params()),
-                    Some(payload.clone()),
-                )
+                self.send_json(Method::POST, &request_url, &[], Some(payload.clone()))
             },
         )?;
 
@@ -823,12 +875,16 @@ impl Pan123Client {
                 TransferKind::Upload,
                 &progress,
                 |_, _| {
-                    self.send_json(
-                        self.client.post(&request_url).query(&self.dynamic_params()),
-                        Some(payload.clone()),
-                    )
+                    self.send_json(Method::POST, &request_url, &[], Some(payload.clone()))
                 },
             )?;
+        }
+
+        // 5061：需要实名认证后才可继续。
+        if response.code == 5061 {
+            return Err(Pan123Error::Operation(
+                "upload requires real-name verification (code 5061)".into(),
+            ));
         }
 
         if response.code != 0 {
@@ -839,12 +895,29 @@ impl Pan123Client {
         }
 
         // 现在解析为具体的 UploadRequestData
-        let data: UploadRequestData = serde_json::from_value(response.data.unwrap_or(serde_json::Value::Null))
-            .map_err(|e| Pan123Error::Operation(format!("failed to parse upload request data: {}", e)))?;
+        let mut data: UploadRequestData =
+            serde_json::from_value(response.data.unwrap_or(serde_json::Value::Null)).map_err(|e| {
+                Pan123Error::Operation(format!("failed to parse upload request data: {}", e))
+            })?;
+        // 服务端未下发的字段用本地会话兜底（对齐 web 端 `b()`），
+        // 保证响应体不完整时仍能沿用上次的 uploadId / bucket / storageNode。
+        if let Some(session) = saved_session.as_ref() {
+            upload_session::apply_fallback(&mut data, session);
+        }
         if data.reuse {
             return data.info.ok_or_else(|| {
                 Pan123Error::Operation("reuse upload returned without file info".into())
             });
+        }
+
+        // 拿到 uploadId 后**立即**落盘会话，而不是等用户取消时才写。
+        // 这样即便进程被 kill、断电、或在传分片途中 panic，下次运行也能凭这条记录恢复。
+        if let Some(session) =
+            UploadSession::from_request(&data, &md5_hash, &file_name, file_size, parent_id)
+            && let Err(err) = upload_session::save(&session)
+        {
+            // 落盘失败不影响本次上传，只影响下次能否跨会话恢复。
+            eprintln!("警告：上传会话持久化失败（不影响本次上传）：{err}");
         }
 
         let upload_id = data
@@ -862,13 +935,65 @@ impl Pan123Client {
         let temp_file_id = data
             .file_id
             .ok_or_else(|| Pan123Error::Operation("temporary FileId missing".into()))?;
-        let slice_size = data.slice_size.unwrap_or(16 * 1024 * 1024);
-        let part_count = std::cmp::max(1, file_size.div_ceil(slice_size));
-        let multipart = part_count > 1;
+        // 服务端若返回 0 或缺失，回退到 16 MiB，避免后续 div_ceil(0) 触发 panic。
+        let slice_size = data
+            .slice_size
+            .filter(|value| *value > 0)
+            .unwrap_or(16 * 1024 * 1024);
+        // web 端语义：单分片判定为 size <= SliceSize；`isMultipart = !isOnePart`。
+        let is_one_part = slice_size > 0 && file_size <= slice_size;
+        let multipart = !is_one_part;
+        // uploadFileStatus == 255：服务端已获知分片（异步合并场景），无需再传分片数据。
+        let upload_file_status = data.upload_file_status;
+        let skip_parts = upload_file_status == Some(255);
+        let part_count = if skip_parts {
+            0
+        } else {
+            std::cmp::max(1, file_size.div_ceil(slice_size))
+        };
+
+        // 断点续传：先问对象存储哪些分片已经传完，跳过它们。
+        // 判定规则与 web 端 `k()` 一致：长度等于 SliceSize 的满片有效；
+        // 最后一片只要长度非 0 也视为有效。
+        // 查询失败不阻断上传：`if let` 不成立时退化为全量重传。
+        let mut resumed_bytes: u64 = 0;
+        let mut pending_parts: Vec<u64> = (1u64..=part_count).collect();
+        if multipart
+            && part_count > 1
+            && let Ok(parts) = self.list_upload_parts(&bucket, &key, &upload_id, &storage_node)
+        {
+            for part in parts {
+                let Some(number) = part.part_number else {
+                    continue;
+                };
+                if number == 0 || number > part_count {
+                    continue;
+                }
+                let size = part.size.unwrap_or(0);
+                let is_last = number == part_count;
+                if size == slice_size || (is_last && size != 0) {
+                    resumed_bytes += size;
+                    pending_parts.retain(|candidate| *candidate != number);
+                }
+            }
+        }
 
         let file_path_arc = Arc::new(file_path.to_path_buf());
-        let part_queue = Arc::new(Mutex::new((1u64..=part_count).collect::<Vec<_>>()));
-        let uploaded = Arc::new(Mutex::new(0u64));
+        let part_queue = Arc::new(Mutex::new(pending_parts));
+        let uploaded = Arc::new(Mutex::new(resumed_bytes));
+
+        // 让进度条立刻反映「续传已完成的字节数」，而不是从 0 开始。
+        if resumed_bytes > 0 {
+            self.emit(
+                &progress,
+                TransferEvent::Progress {
+                    id: transfer_id.to_string(),
+                    kind: TransferKind::Upload,
+                    bytes: resumed_bytes,
+                    total_bytes: Some(file_size),
+                },
+            );
+        }
 
         let chunk_parallelism = parallelism.min(part_count as usize).max(1);
         let (tx, rx) = mpsc::channel();
@@ -952,13 +1077,13 @@ impl Pan123Client {
                         &progress,
                         |_, _| {
                             let auth_res: ApiEnvelope<PresignedUrlsData> = client.send_json(
-                                client
-                                    .client
-                                    .post(&auth_url)
-                                    .query(&client.dynamic_params()),
+                                Method::POST,
+                                &auth_url,
+                                &[],
                                 Some(auth_payload.clone()),
                             )?;
-                            let mut pre_signed = client.unwrap_data(auth_res)?.presigned_urls;
+                            let auth_data = client.unwrap_data(auth_res)?;
+                            let mut pre_signed = auth_data.presigned_urls;
                             let put_url =
                                 pre_signed.remove(&part_number.to_string()).ok_or_else(|| {
                                     Pan123Error::Operation(format!(
@@ -966,14 +1091,27 @@ impl Pan123Client {
                                     ))
                                 })?;
 
+                            // web 端会把响应体里的 headers 原样透传到 PUT；
+                            // 部分存储节点缺失这些头会直接拒签，因此这里必须带上。
+                            let mut put_headers = reqwest::header::HeaderMap::new();
+                            for (name, value) in &auth_data.headers {
+                                if let (Ok(name), Ok(value)) = (
+                                    reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+                                    reqwest::header::HeaderValue::from_str(value),
+                                ) {
+                                    put_headers.insert(name, value);
+                                }
+                            }
+
                             // 为大分片使用更长的超时时间
                             // 假设最低速度 1MB/s，给予 2 倍缓冲时间
-                            let chunk_mb = chunk_len / (1024 * 1024).max(1);
+                            let chunk_mb = chunk_len / (1024 * 1024);
                             let timeout_secs = (chunk_mb * 2).max(300); // 至少 5 分钟，最多根据分片大小调整
 
                             client
                                 .client
                                 .put(&put_url)
+                                .headers(put_headers)
                                 .header("Content-Length", chunk_len.to_string())
                                 .timeout(Duration::from_secs(timeout_secs as u64))
                                 .body(chunk.clone())
@@ -1024,7 +1162,15 @@ impl Pan123Client {
             let _ = handle.join();
         }
 
-        let complete_url = format!("{}/b/api/file/upload_complete/v2", self.domain());
+        // 上传成功即清理会话记录（含同 md5 的历史残留），避免下次误用已失效的 uploadId。
+        // 对齐 web 端：成功后调用 `v(fileMd5, name, size)` 清空对应 sessionStorage 项。
+        // 该闭包只捕获共享引用与 u64，因此是 Copy，可在多个分支里复用。
+        let finish = |info: FileInfo| {
+            upload_session::remove_stale(&md5_hash, &file_name, file_size);
+            info
+        };
+
+        // 完成/合并。payload 与 web 端 `upload_complete` 完全一致（GET 轮询亦复用同一组参数）。
         let complete_payload = json!({
             "fileId": temp_file_id,
             "bucket": bucket,
@@ -1034,37 +1180,113 @@ impl Pan123Client {
             "uploadId": upload_id,
             "StorageNode": storage_node
         });
-        let complete_res: ApiEnvelope<UploadCompleteData> = self.retry_with_backoff_emit(
-            retry,
-            transfer_id,
-            TransferKind::Upload,
-            &progress,
-            |_, _| {
-                self.send_json(
-                    self.client
-                        .post(&complete_url)
-                        .query(&self.dynamic_params()),
-                    Some(complete_payload.clone()),
-                )
-            },
-        )?;
-        let complete_data = self.unwrap_data(complete_res)?;
-        if let Some(file_info) = complete_data.file_info {
-            return Ok(file_info);
+
+        // uploadFileStatus == 255：服务端直接进入异步合并，轮询 `upload_complete/result` 即可。
+        if skip_parts {
+            return self.poll_upload_complete(&complete_payload).map(finish);
         }
 
-        for _ in 0..30 {
-            let maybe_file = self.get_file_info(&[temp_file_id])?.into_iter().next();
-            if let Some(file_info) = maybe_file
-                && file_info.status.unwrap_or_default() == 0
-            {
+        // 合并请求：默认走 v2，可用环境变量 `PAN123_UPLOAD_COMPLETE_V3=1` 强制优先 v3。
+        // 两个版本的请求体完全一致，任一版本失败时自动回退到另一版本。
+        let prefer_v3 = std::env::var("PAN123_UPLOAD_COMPLETE_V3")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let versions: [u8; 2] = if prefer_v3 { [3, 2] } else { [2, 3] };
+
+        let mut complete_data: Option<UploadCompleteData> = None;
+        let mut last_error: Option<Pan123Error> = None;
+        for version in versions {
+            let complete_url = format!("{}/b/api/file/upload_complete/v{version}", self.domain());
+            match self.retry_with_backoff_emit(
+                retry,
+                transfer_id,
+                TransferKind::Upload,
+                &progress,
+                |_, _| {
+                    self.send_json(
+                        Method::POST,
+                        &complete_url,
+                        &[],
+                        Some(complete_payload.clone()),
+                    )
+                },
+            ) {
+                Ok(res) => match self.unwrap_data(res) {
+                    Ok(data) => {
+                        complete_data = Some(data);
+                        break;
+                    }
+                    Err(err) => last_error = Some(err),
+                },
+                Err(err) => last_error = Some(err),
+            }
+        }
+
+        let Some(complete_data) = complete_data else {
+            return Err(last_error.unwrap_or_else(|| {
+                Pan123Error::Operation("upload complete rejected by both v2 and v3".into())
+            }));
+        };
+
+        if let Some(file_info) = complete_data.file_info {
+            return Ok(finish(file_info));
+        }
+        // 未直接返回文件信息时，优先走新版 `upload_complete/result` 轮询；
+        // 若该接口不可用，再退化为按 FileId 轮询文件详情。
+        match self.poll_upload_complete(&complete_payload) {
+            Ok(info) => Ok(finish(info)),
+            Err(_) => {
+                for _ in 0..30 {
+                    let maybe_file = self.get_file_info(&[temp_file_id])?.into_iter().next();
+                    if let Some(file_info) = maybe_file
+                        && file_info.status.unwrap_or_default() == 0
+                    {
+                        return Ok(finish(file_info));
+                    }
+                    thread::sleep(Duration::from_secs(1));
+                }
+
+                Err(Pan123Error::Operation(
+                    "upload verification timed out".into(),
+                ))
+            }
+        }
+    }
+
+    /// 轮询 `file/upload_complete/result`，等待服务端异步合并完成。
+    ///
+    /// 该接口为 web 新增：参数与 `upload_complete` 的请求体一致，通过查询串传递。
+    fn poll_upload_complete(&self, payload: &Value) -> Result<FileInfo> {
+        let url = format!("{}/b/api/file/upload_complete/result", self.domain());
+        let params: Vec<(String, String)> = payload
+            .as_object()
+            .map(|object| {
+                object
+                    .iter()
+                    .map(|(key, value)| {
+                        let text = match value {
+                            Value::String(text) => text.clone(),
+                            other => other.to_string(),
+                        };
+                        (key.clone(), text)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for _ in 0..60 {
+            let res: ApiEnvelope<UploadCompleteData> =
+                self.send_json(Method::GET, &url, &params, None::<Value>)?;
+            let data = self.unwrap_data(res)?;
+            if let Some(file_info) = data.file_info {
                 return Ok(file_info);
             }
-            thread::sleep(Duration::from_secs(1));
+            let delay = data.duration.unwrap_or(2).clamp(1, 10) as u64;
+            thread::sleep(Duration::from_secs(delay));
         }
 
         Err(Pan123Error::Operation(
-            "upload verification timed out".into(),
+            "upload complete polling timed out".into(),
         ))
     }
 
@@ -1233,11 +1455,11 @@ impl Pan123Client {
 
     fn init_domains(&mut self) -> Result<()> {
         let url = format!("{}/api/dydomain", DEFAULT_UCENTER_URL);
-        let res: ApiEnvelope<DomainData> = match self.send_json(self.client.get(url), None::<Value>)
-        {
-            Ok(res) => res,
-            Err(_) => return Ok(()),
-        };
+        let res: ApiEnvelope<DomainData> =
+            match self.send_json(Method::GET, &url, &[], None::<Value>) {
+                Ok(res) => res,
+                Err(_) => return Ok(()),
+            };
         if res.code != 0 {
             return Ok(());
         }
@@ -1266,7 +1488,14 @@ impl Pan123Client {
 
         for _ in 0..120 {
             let res: ApiEnvelope<QrResultData> = self.send_json(
-                self.client.get(&url).query(&[("uniID", uni_id)]),
+                Method::GET,
+                &url,
+                &[
+                    ("uniID".to_string(), uni_id.to_string()),
+                    // web 新增：remember / gray 用于「记住登录」与新灰度流程。
+                    ("remember".to_string(), "true".to_string()),
+                    ("gray".to_string(), "true".to_string()),
+                ],
                 None::<Value>,
             )?;
             let data = res.data.clone();
@@ -1286,14 +1515,24 @@ impl Pan123Client {
                             let wx_code_url =
                                 format!("{}/api/user/qr-code/wx_code", self.ucenter_url);
                             let wx_res: ApiEnvelope<WxCodeData> = self.send_json(
-                                self.client.post(wx_code_url),
+                                Method::POST,
+                                &wx_code_url,
+                                &[],
                                 Some(json!({"uniID": uni_id})),
                             )?;
                             if let Some(wx_code) = self.unwrap_data(wx_res)?.wx_code {
                                 let sign_in_url = format!("{}/api/user/sign_in", self.ucenter_url);
                                 let sign_res: ApiEnvelope<SignInData> = self.send_json(
-                                    self.client.post(sign_in_url),
-                                    Some(json!({"from": "web", "wechat_code": wx_code, "type": 4})),
+                                    Method::POST,
+                                    &sign_in_url,
+                                    &[],
+                                    Some(json!({
+                                        "from": "web",
+                                        "wechat_code": wx_code,
+                                        "type": 4,
+                                        "remember": true,
+                                        "gray": true
+                                    })),
                                 )?;
                                 if (sign_res.code == 0 || sign_res.code == 200)
                                     && let Some(token) = sign_res.data.and_then(|data| data.token)
@@ -1325,7 +1564,9 @@ impl Pan123Client {
     fn check_download_traffic(&self, file_ids: &[u64]) -> Result<()> {
         let url = format!("{}/b/api/file/download/traffic/check", self.domain());
         let res: ApiEnvelope<TrafficCheckData> = self.send_json(
-            self.client.post(url).query(&self.dynamic_params()),
+            Method::POST,
+            &url,
+            &[],
             Some(json!({"fids": file_ids})),
         )?;
         let data = self.unwrap_data(res)?;
@@ -1336,7 +1577,7 @@ impl Pan123Client {
     }
 
     fn calculate_file_md5(&self, file_path: &Path) -> Result<String> {
-        let mut context = Context::new();
+        let mut context = Md5Context::new();
         let mut file = File::open(file_path)?;
         let file_size = file.metadata()?.len();
 
@@ -1400,16 +1641,26 @@ impl Pan123Client {
         })
     }
 
-    fn dynamic_params(&self) -> HashMap<String, String> {
-        let mut rng = rand::rng();
-        let key = rng.random_range(0..i32::MAX);
-        let value = format!(
-            "{}-{}-{}",
-            chrono::Utc::now().timestamp(),
-            rng.random_range(0..10_000_000u64),
-            rng.random_range(0..10_000_000_000u64)
-        );
-        HashMap::from([(key.to_string(), value)])
+    /// 拉取服务端时间并缓存。用于动态签名的时间基准。
+    ///
+    /// 该方法刻意不使用 [`Self::send_json`]，避免签名逻辑自身产生递归依赖。
+    fn refresh_server_time(&self) -> Option<i64> {
+        let url = format!("{}{}", self.domain(), SERVER_TIME_PATH);
+        let response = self.client.get(url).send().ok()?;
+        let value: Value = response.json().ok()?;
+        let timestamp = value.get("data")?.get("timestamp")?.as_i64()?;
+        if let Ok(mut guard) = self.server_timestamp.lock() {
+            *guard = Some(timestamp);
+        }
+        Some(timestamp)
+    }
+
+    /// 按前端规则生成本次请求的动态签名 `(key, value)`。
+    fn next_signature(&self, path: &str) -> (String, String) {
+        let server_ts = self.server_timestamp.lock().ok().and_then(|guard| *guard);
+        let timestamp = signature::pick_timestamp(signature::local_timestamp(), server_ts);
+        let nonce = rand::rng().random_range(0..=10_000_000u64);
+        signature::build(path, timestamp, nonce)
     }
 
     fn domain(&self) -> &str {
@@ -1430,29 +1681,81 @@ impl Pan123Client {
         }
     }
 
+    /// 发送请求并解析 JSON。
+    ///
+    /// * `method` —— HTTP 方法。
+    /// * `url`    —— 完整请求地址。
+    /// * `query`  —— 业务查询参数（**不含**动态签名，签名由本方法自动注入）。
+    /// * `body`   —— 可选 JSON 请求体。
+    ///
+    /// 对 `/b/api/` 前缀的请求会自动注入 web 端要求的动态签名；
+    /// 若服务端返回 `code = -3`（签名失效），会刷新服务端时间后自动重试一次。
     fn send_json<T, B>(
         &self,
-        builder: reqwest::blocking::RequestBuilder,
+        method: Method,
+        url: &str,
+        query: &[(String, String)],
         body: Option<B>,
     ) -> Result<T>
     where
         T: DeserializeOwned,
         B: Serialize,
     {
-        if let Some(limiter) = &self.rate_limiter {
-            limiter.acquire();
+        let path = Url::parse(url)
+            .map(|parsed| parsed.path().to_string())
+            .unwrap_or_default();
+        let signed = signature::needs_signature(&path) && !signature::is_exempt(&path);
+
+        let mut last_error: Option<Pan123Error> = None;
+        for attempt in 0..2 {
+            if attempt == 1 {
+                // 签名失效：刷新服务端时间后重试。
+                let _ = self.refresh_server_time();
+            }
+
+            if let Some(limiter) = &self.rate_limiter {
+                limiter.acquire();
+            }
+
+            let mut request = self.client.request(method.clone(), url);
+            if !query.is_empty() {
+                request = request.query(query);
+            }
+            if signed {
+                let (key, value) = self.next_signature(&path);
+                request = request.query(&[(key, value)]);
+            }
+            let request = self.with_auth(request);
+            let request = match body.as_ref() {
+                Some(payload) => request.json(payload),
+                None => request,
+            };
+
+            let response = request.send()?;
+            let value: Value = Self::decode_value(response)?;
+
+            let code = value.get("code").and_then(Value::as_i64).unwrap_or(0);
+            let message = value
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if signed && attempt == 0 && code == DYKEY_ERROR_CODE && message.contains("dykey") {
+                last_error = Some(Pan123Error::Api {
+                    code,
+                    message: message.to_string(),
+                });
+                continue;
+            }
+
+            return serde_json::from_value(value).map_err(|e| {
+                Pan123Error::Operation(format!("failed to parse api response: {e}"))
+            });
         }
 
-        let request = self.with_auth(builder);
-        let response = if let Some(body) = body {
-            request.json(&body).send()?
-        } else {
-            request.send()?
-        };
-        Self::decode_json(response)
+        Err(last_error.unwrap_or_else(|| Pan123Error::Operation("request failed".into())))
     }
 
-    fn decode_json<T: DeserializeOwned>(response: Response) -> Result<T> {
+    fn decode_value(response: Response) -> Result<Value> {
         let status = response.status();
         let url = response.url().to_string();
         let response = response.error_for_status()?;

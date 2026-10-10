@@ -4,13 +4,16 @@ pub mod error;
 pub mod models;
 pub mod rate_limiter;
 pub mod secure_storage;
+pub mod signature;
 pub mod transfer;
+pub mod upload_session;
 
 pub use client::{Pan123Client, TokenCheckStatus};
 pub use error::{Pan123Error, Result};
 pub use models::{CwdStore, DownloadTarget, DuplicateMode, FileInfo, UploadTarget};
 pub use rate_limiter::{RateLimiter, RateLimiterConfig};
 pub use secure_storage::{SecureStorage, StorageBackend};
+pub use upload_session::UploadSession;
 pub use transfer::{
     DownloadOptions, ProgressCallback, RetryPolicy, TransferEvent, TransferFailure, TransferKind,
     TransferOptions, UploadDirectoryReport, UploadFailureKind, UploadOptions,

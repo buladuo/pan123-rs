@@ -12,6 +12,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use owo_colors::OwoColorize;
 use pan123_sdk::config;
 use pan123_sdk::models::CwdStore;
+use pan123_sdk::upload_session;
 use pan123_sdk::{
     DownloadOptions, DuplicateMode, FileInfo, Pan123Client, Pan123Error, ProgressCallback, Result,
     RetryPolicy, TokenCheckStatus, TransferEvent, TransferKind, TransferOptions,
@@ -29,7 +30,8 @@ use crate::icons;
 
 const COMMANDS: &[&str] = &[
     "login", "info", "pwd", "cd", "ls", "tree", "upload", "download", "mkdir", "rename", "mv",
-    "cp", "rm", "status", "stat", "find", "refresh", "clear", "shell", "help", "exit", "quit",
+    "cp", "rm", "status", "stat", "find", "refresh", "upload-sessions", "clear", "shell", "help",
+    "exit", "quit",
 ];
 
 #[derive(Debug, Parser)]
@@ -75,6 +77,10 @@ enum Command {
         jobs: Option<usize>,
         #[arg(long, default_value_t = 3)]
         retries: usize,
+        /// 忽略本地记录的未完成上传会话，重新走一遍 upload_request。
+        /// （服务端已存在的分片仍会被跳过，那属协议固有行为。）
+        #[arg(long)]
+        no_resume: bool,
     },
     Download {
         targets: Vec<String>,
@@ -125,6 +131,16 @@ enum Command {
     Refresh {
         #[arg(long)]
         all: bool,
+    },
+    /// 查看 / 清理本地记录的「未完成上传会话」（跨会话断点续传的依据）。
+    #[command(name = "upload-sessions", visible_alias = "sessions")]
+    UploadSessions {
+        /// 清空全部会话记录。
+        #[arg(long)]
+        clear: bool,
+        /// 以 JSON 输出。
+        #[arg(long)]
+        json: bool,
     },
     Clear,
     Shell,
@@ -244,6 +260,7 @@ impl Pan123Cli {
                 duplicate,
                 jobs,
                 retries,
+                no_resume,
             } => {
                 self.ensure_auth()?;
                 let cwd = config::load_cwd();
@@ -253,6 +270,7 @@ impl Pan123Cli {
                 };
                 let options = UploadOptions {
                     transfer: build_transfer_options(jobs, retries),
+                    resume: !no_resume,
                 };
                 let progress = CliProgress::new();
                 let callback = progress.callback();
@@ -454,15 +472,69 @@ impl Pan123Cli {
                 self.refresh_shell_cache();
                 if all {
                     let removed = config::clear_resume_meta_dir()?;
+                    // 过期的上传会话同样属于陈旧缓存，一并清理（未过期的不动，那是可恢复的上传）。
+                    let expired = upload_session::purge_expired();
                     println!(
-                        "{} {} {}",
+                        "{} {} {}，{} {}",
                         "缓存已清理。".green(),
                         "已删除".bright_white(),
-                        format!("{removed} 个续传元数据文件").bright_yellow()
+                        format!("{removed} 个续传元数据文件").bright_yellow(),
+                        "以及".bright_white(),
+                        format!("{expired} 条过期上传会话").bright_yellow()
                     );
                 } else {
                     println!("{}", "补全缓存已清理。".green());
                 }
+                Ok(())
+            }
+            Command::UploadSessions { clear, json } => {
+                if clear {
+                    let removed = upload_session::clear()?;
+                    println!(
+                        "{} 已清理 {} 条上传会话记录",
+                        "完成".green(),
+                        removed.to_string().bright_yellow()
+                    );
+                    return Ok(());
+                }
+
+                let sessions = upload_session::list();
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&sessions)?);
+                    return Ok(());
+                }
+                if sessions.is_empty() {
+                    println!("{}", "没有未完成的上传会话记录。".dimmed());
+                    return Ok(());
+                }
+
+                let now = upload_session::now_millis();
+                let mut table = Table::new();
+                table.load_preset(presets::UTF8_FULL);
+                table.set_header(vec![
+                    Cell::new("文件名").add_attribute(Attribute::Bold),
+                    Cell::new("大小").add_attribute(Attribute::Bold),
+                    Cell::new("uploadId").add_attribute(Attribute::Bold),
+                    Cell::new("父目录ID").add_attribute(Attribute::Bold),
+                    Cell::new("保存时间").add_attribute(Attribute::Bold),
+                ]);
+                for session in &sessions {
+                    let shown: String = session.upload_id.chars().take(12).collect();
+                    table.add_row(vec![
+                        Cell::new(&session.file_name),
+                        Cell::new(human_size(session.file_size)),
+                        Cell::new(format!("{shown}…")),
+                        Cell::new(session.parent_file_id.to_string()),
+                        Cell::new(human_age(now - session.saved_at)),
+                    ]);
+                }
+                println!("{table}");
+                println!(
+                    "{} 共 {} 条未完成会话（7 天自动过期）。用 {} 清空。",
+                    "提示".bright_blue(),
+                    sessions.len().to_string().bright_yellow(),
+                    "pan123 upload-sessions --clear".bright_white()
+                );
                 Ok(())
             }
             Command::Clear => clear_screen(),
@@ -1871,6 +1943,24 @@ fn human_size(size: u64) -> String {
     } else {
         format!("{value:.2} {}", UNITS[unit])
     }
+}
+
+/// 把毫秒间隔渲染成「刚刚 / N 分钟前 / N 小时前 / N 天前」。
+fn human_age(delta_millis: i64) -> String {
+    let delta = delta_millis.max(0);
+    let minutes = delta / 60_000;
+    if minutes < 1 {
+        return "刚刚".to_string();
+    }
+    let hours = minutes / 60;
+    if hours < 1 {
+        return format!("{minutes} 分钟前");
+    }
+    let days = hours / 24;
+    if days < 1 {
+        return format!("{hours} 小时前");
+    }
+    format!("{days} 天前")
 }
 
 fn join_path(base: &str, segment: &str) -> String {

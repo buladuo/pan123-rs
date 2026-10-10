@@ -130,6 +130,16 @@ pub struct FileListData {
 pub struct QrGenerateData {
     #[serde(rename = "uniID", default)]
     pub uni_id: String,
+    /// 新版接口直接下发扫码地址；旧版可能缺失。
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+impl QrGenerateData {
+    /// 返回可直接生成二维码的登录地址。
+    pub fn scan_url(&self) -> Option<String> {
+        self.url.clone().filter(|value| !value.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -205,12 +215,50 @@ pub struct UploadRequestData {
         deserialize_with = "deserialize_option_u64_from_any"
     )]
     pub slice_size: Option<u64>,
+    /// 服务端上传状态；255 表示需走 `upload_complete/result` 异步轮询。
+    #[serde(
+        rename = "UploadFileStatus",
+        deserialize_with = "deserialize_option_u64_from_any"
+    )]
+    pub upload_file_status: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct PresignedUrlsData {
+    /// 键为 **1 起始** 的分片序号，值为该分片的 PUT 预签名地址。
     #[serde(rename = "presignedUrls", default)]
     pub presigned_urls: std::collections::HashMap<String, String>,
+    /// 部分存储节点要求上传分片时一并携带的附加请求头（web 端会原样透传到 PUT）。
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+}
+
+/// `file/s3_list_upload_parts` 返回的单个「已存在于对象存储上的分片」。
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct UploadedPart {
+    #[serde(
+        rename = "PartNumber",
+        default,
+        deserialize_with = "deserialize_option_u64_from_any"
+    )]
+    pub part_number: Option<u64>,
+    #[serde(rename = "ETag", default)]
+    pub etag: Option<String>,
+    #[serde(
+        rename = "Size",
+        default,
+        deserialize_with = "deserialize_option_u64_from_any"
+    )]
+    pub size: Option<u64>,
+}
+
+/// `file/s3_list_upload_parts` 响应体。
+///
+/// 后端不同版本分别使用 `Parts` / `parts` 作为字段名，这里两者都接受。
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ListPartsData {
+    #[serde(rename = "Parts", alias = "parts", default)]
+    pub parts: Vec<UploadedPart>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -219,6 +267,12 @@ pub struct UploadCompleteData {
     pub file_info: Option<FileInfo>,
     #[serde(rename = "async")]
     pub is_async: Option<bool>,
+    /// `upload_complete/result` 轮询建议的等待秒数。
+    #[serde(
+        default,
+        deserialize_with = "deserialize_option_u64_from_any"
+    )]
+    pub duration: Option<u64>,
 }
 
 #[derive(Debug, Clone)]

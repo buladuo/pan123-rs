@@ -9,7 +9,23 @@ use crate::secure_storage::SecureStorage;
 pub const TOKEN_FILE: &str = "123pan_token.json";
 pub const CWD_FILE: &str = "123pan_cwd.json";
 
+/// 显式指定令牌的环境变量名。
+///
+/// 用于 CI、多账号切换、脚本化调用等场景：它的优先级**高于**系统密钥环与本地文件，
+/// 因此可以完全绕过（且不污染）机器上已保存的登录态。
+pub const TOKEN_ENV: &str = "PAN123_TOKEN";
+
 pub fn load_token() -> Option<String> {
+    // 1) 环境变量显式覆盖。
+    if let Some(token) = env::var(TOKEN_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Some(token);
+    }
+
+    // 2) 系统密钥环（优先）与本地文件。
     let storage = SecureStorage::auto(default_state_path(TOKEN_FILE));
 
     if let Some(token) = storage.load_token() {
@@ -55,6 +71,16 @@ pub fn save_cwd(cwd: &CwdStore) -> Result<()> {
 
 pub fn resume_meta_dir() -> PathBuf {
     let path = config_dir().join("resume");
+    let _ = fs::create_dir_all(&path);
+    path
+}
+
+/// 上传会话（断点续传元数据）存放目录。
+///
+/// 与下载的 `resume/` 分开存放：上传会话以 `md5 + 父目录 + 名称 + 大小` 为身份，
+/// 记录的是服务端 `uploadId` 等参数，语义与下载续传元数据完全不同。
+pub fn upload_session_dir() -> PathBuf {
+    let path = config_dir().join("upload_sessions");
     let _ = fs::create_dir_all(&path);
     path
 }

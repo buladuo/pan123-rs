@@ -92,9 +92,31 @@ impl Default for TransferOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+/// 上传选项。
+#[derive(Debug, Clone, Copy)]
 pub struct UploadOptions {
     pub transfer: TransferOptions,
+    /// 是否启用「跨会话断点续传」。
+    ///
+    /// 为 `true`（默认）时，上传前会查找本地记录的未完成会话
+    /// （`<config_dir>/upload_sessions/*.json`，键形如
+    /// `mfy-upload-session:{md5}:{parent}:{name}:{size}`），命中则复用其
+    /// `uploadId`，并在服务端响应字段缺失时用会话兜底。
+    ///
+    /// 设为 `false` 时**不读取**本地会话，等价于「不信任上次的记录，重新走一遍
+    /// `upload_request`」。注意：这**不会**禁用「跳过服务端已存在的分片」——
+    /// 那由 `file/s3_list_upload_parts` 决定，属协议固有行为（同一个文件身份
+    /// 服务端本就返回同一个 `uploadId`，重复传分片没有意义）。
+    pub resume: bool,
+}
+
+impl Default for UploadOptions {
+    fn default() -> Self {
+        Self {
+            transfer: TransferOptions::default(),
+            resume: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
