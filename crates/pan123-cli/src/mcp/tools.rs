@@ -133,7 +133,7 @@ pub fn tool_specs() -> Vec<ToolSpec> {
         ),
         spec(
             "rename_file",
-            "重命名文件或目录。这是修改操作。",
+            "重命名文件或目录。这是修改操作，执行前必须先向用户确认。",
             json!({
                 "file_id": id_property("要重命名的对象 ID"),
                 "new_name": { "type": "string", "description": "新名称" }
