@@ -164,6 +164,8 @@ enum Command {
     },
     Clear,
     Shell,
+    /// 以 MCP（Model Context Protocol）服务器的形式运行，通过 stdio 与客户端通信。
+    Mcp,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -555,6 +557,16 @@ impl Pan123Cli {
                     sessions.len().to_string().bright_yellow(),
                     "pan123 upload-sessions --clear".bright_white()
                 );
+                Ok(())
+            }
+            Command::Mcp => {
+                // MCP 路径下 stdout 属于协议流，绝不能有任何日志写进去。
+                let client = Pan123Client::with_rate_limiter(config::load_token(), None)?;
+                let tools = std::sync::Arc::new(crate::mcp::tools::Pan123Tools { client });
+                let stdin = std::io::stdin();
+                let reader = std::io::BufReader::new(stdin.lock());
+                crate::mcp::protocol::run_server(tools, reader, std::io::stdout())
+                    .map_err(|err| Pan123Error::Operation(format!("MCP server 异常退出：{err}")))?;
                 Ok(())
             }
             Command::Clear => clear_screen(),

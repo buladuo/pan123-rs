@@ -12,7 +12,6 @@ pub const PARSE_ERROR: i64 = -32700;
 pub const INVALID_REQUEST: i64 = -32600;
 pub const METHOD_NOT_FOUND: i64 = -32601;
 pub const INVALID_PARAMS: i64 = -32602;
-pub const INTERNAL_ERROR: i64 = -32603;
 
 /// 解析一行 stdin。成功返回请求对象；失败返回一个已构造好的 JSON-RPC 错误响应。
 pub fn parse_line(line: &str) -> std::result::Result<Value, Value> {
@@ -110,7 +109,9 @@ impl ProgressSink {
         }
     }
 
-    /// 不发任何通知的哑实现，用于测试与无 progressToken 的场景。
+    /// 不发任何通知的哑实现：仅供测试构造 `CallContext` 使用。
+    /// 生产路径一律走 [`ProgressSink::new`]（没有 progressToken 时 `report` 自身会丢弃）。
+    #[cfg(test)]
     pub fn discarding() -> Self {
         Self {
             inner: None,
