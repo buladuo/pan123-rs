@@ -17,6 +17,37 @@
 - 🌲 目录树：支持递归显示目录结构
 - 🔍 文件搜索：支持按名称搜索文件
 
+## 与 AI 客户端集成（MCP）
+
+本工具内置 MCP（Model Context Protocol）服务器，可让你的 AI 客户端直接操作 123 云盘。
+
+在客户端配置中加入：
+
+```json
+{
+  "mcpServers": {
+    "pan123": { "command": "pan123", "args": ["mcp"] }
+  }
+}
+```
+
+Claude Code 用户可以执行 `claude mcp add pan123 -- pan123 mcp` 完成配置。
+
+配置后可用 18 个工具完成浏览、查找、整理、上传、下载等操作，传输过程会上报进度，且支持取消。
+
+> MCP 服务器**无状态**：没有“当前目录”，每个操作都要显式指定 `parent_id`（根目录为 `0`）。
+
+### Claude Skill
+
+仓库 `skills/` 下提供两个 Skill：`pan123-mcp`（面向已配 MCP 的客户端）与 `pan123-cli`（面向命令行）。
+
+运行 `./install.sh`（或 `install.bat`）时会提示是否一并安装到 `~/.claude/skills/`。也可手动复制：
+
+```bash
+mkdir -p ~/.claude/skills
+cp -R skills/pan123-mcp skills/pan123-cli ~/.claude/skills/
+```
+
 ## 安装
 
 ### 从源码编译

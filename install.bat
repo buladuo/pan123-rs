@@ -120,6 +120,20 @@ if errorlevel 1 (
 echo.
 for /f "tokens=*" %%i in ('"%INSTALL_DIR%\%BINARY_NAME%" --version 2^>nul') do set NEW_VERSION=%%i
 
+REM 安装 Claude Skill（可选）
+if exist "%~dp0skills" (
+    echo.
+    set /p INSTALL_SKILL=是否一并安装 Claude Code Skill 到 %USERPROFILE%\.claude\skills ? ^(y/N^): 
+    if /i "!INSTALL_SKILL!"=="y" (
+        if not exist "%USERPROFILE%\.claude\skills" mkdir "%USERPROFILE%\.claude\skills"
+        xcopy /E /I /Y "%~dp0skills\pan123-mcp" "%USERPROFILE%\.claude\skills\pan123-mcp" >nul
+        xcopy /E /I /Y "%~dp0skills\pan123-cli" "%USERPROFILE%\.claude\skills\pan123-cli" >nul
+        echo ? Skill 已安装
+        echo.
+        echo 接入 MCP 客户端，在配置中加入:
+        echo   { "mcpServers": { "pan123": { "command": "pan123", "args": ["mcp"] } } }
+    )
+)
 echo.
 echo ========================================
 echo ? 安装完成！

@@ -66,6 +66,16 @@ if [ -f "${INSTALL_DIR}/${BINARY_NAME}" ]; then
 fi
 
 echo -e "${GREEN}✓ 已删除程序文件${NC}"
+
+# 移除 Claude Skill
+SKILL_DEST_DIR="${HOME}/.claude/skills"
+for skill in pan123-mcp pan123-cli; do
+    if [ -d "${SKILL_DEST_DIR}/${skill}" ]; then
+        rm -rf "${SKILL_DEST_DIR}/${skill}"
+        echo -e "${GREEN}✓ 已移除 Skill: ${skill}${NC}"
+    fi
+done
+
 echo ""
 echo -e "${BLUE}========================================${NC}"
 echo -e "${GREEN}✓ 卸载完成！${NC}"

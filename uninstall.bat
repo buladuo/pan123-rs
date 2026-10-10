@@ -75,6 +75,10 @@ if not exist "%INSTALL_DIR%" (
     echo ? 已删除安装目录
 )
 
+REM 移除 Claude Skill
+if exist "%USERPROFILE%\.claude\skills\pan123-mcp" rmdir /S /Q "%USERPROFILE%\.claude\skills\pan123-mcp"
+if exist "%USERPROFILE%\.claude\skills\pan123-cli" rmdir /S /Q "%USERPROFILE%\.claude\skills\pan123-cli"
+echo ? 已移除 pan123 Skill
 echo.
 echo ========================================
 echo ? 卸载完成！
