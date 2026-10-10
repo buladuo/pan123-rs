@@ -16,6 +16,8 @@ Cargo.lock
 
 # Claude Code 本地配置（env 段含 API 密钥，禁止入库）
 .claude/settings*.json
+# 隔离工作区（避免主仓库把 worktree 内容当未跟踪文件）
+.claude/worktrees/
 
 # IDE 和编辑器
 .vscode/
