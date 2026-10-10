@@ -57,6 +57,9 @@ pub enum Pan123Error {
 
     #[error("configuration error: {0}")]
     Config(String),
+
+    #[error("operation cancelled")]
+    Cancelled,
 }
 
 impl Pan123Error {
@@ -85,5 +88,41 @@ impl Pan123Error {
             }
             other => other,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transfer::CancelTokenExt;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn cancelled_is_not_retryable() {
+        assert!(!Pan123Error::Cancelled.is_retryable());
+    }
+
+    #[test]
+    fn cancelled_is_not_auth_error() {
+        assert!(!Pan123Error::Cancelled.is_auth_error());
+    }
+
+    #[test]
+    fn cancelled_is_not_client_error() {
+        assert!(!Pan123Error::Cancelled.is_client_error());
+    }
+
+    #[test]
+    fn token_starts_uncancelled_and_check_passes() {
+        let token: crate::transfer::CancelToken = Arc::new(AtomicBool::new(false));
+        assert!(token.check().is_ok());
+    }
+
+    #[test]
+    fn token_check_fails_after_cancel() {
+        let token: crate::transfer::CancelToken = Arc::new(AtomicBool::new(false));
+        token.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(token.check(), Err(Pan123Error::Cancelled)));
     }
 }

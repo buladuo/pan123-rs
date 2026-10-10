@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::models::FileInfo;
 
@@ -244,3 +245,25 @@ impl UploadDirectoryReport {
 }
 
 pub type ProgressCallback = Arc<dyn Fn(TransferEvent) + Send + Sync + 'static>;
+
+/// 传输取消令牌。`true` 表示已被取消。
+///
+/// 由调用方创建并持有；SDK 在传输循环中检查它，一旦置位即返回
+/// [`Pan123Error::Cancelled`]。CLI 与 MCP 之外的调用方传 `None` 即可，
+/// 行为与加入该特性之前完全一致。
+pub type CancelToken = Arc<AtomicBool>;
+
+/// 便于在传输循环里做检查点。
+pub trait CancelTokenExt {
+    fn check(&self) -> crate::Result<()>;
+}
+
+impl CancelTokenExt for CancelToken {
+    fn check(&self) -> crate::Result<()> {
+        if self.load(Ordering::SeqCst) {
+            Err(crate::Pan123Error::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
