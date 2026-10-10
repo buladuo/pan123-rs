@@ -77,6 +77,28 @@ impl Pan123Client {
         token: Option<String>,
         rate_limiter_config: Option<RateLimiterConfig>,
     ) -> Result<Self> {
+        let mut instance = Self::build(token, rate_limiter_config)?;
+        instance.init_domains()?;
+        // 动态签名需要服务端时间基准；失败不致命，后续请求会退化到本地时间。
+        let _ = instance.refresh_server_time();
+        Ok(instance)
+    }
+
+    /// 构造一个不做任何网络探测的客户端：跳过域名发现与服务器时间刷新。
+    ///
+    /// [`with_rate_limiter`](Self::with_rate_limiter) 在构造时会向 123 云盘发出两个
+    /// 请求（`/api/dydomain` 与 `/b/api/get/server/time`）。两者都软失败，因此离线也
+    /// 能构造成功，但会让调用方产生真实网络请求、并在网络被黑洞时最长阻塞 30 秒
+    /// （`connect_timeout`）。已知离线、或只需要一个可传给 `Pan123Tools` 之类的
+    /// 占位客户端时，用本构造函数。
+    pub fn offline(token: Option<String>) -> Result<Self> {
+        Self::build(token, None)
+    }
+
+    fn build(
+        token: Option<String>,
+        rate_limiter_config: Option<RateLimiterConfig>,
+    ) -> Result<Self> {
         // 前端实际的 LoginUuid 为 64 位十六进制（SHA-256），此处保持一致。
         let login_uuid = {
             let mut hasher = Sha256::new();
@@ -120,7 +142,7 @@ impl Pan123Client {
         let rate_limiter =
             rate_limiter_config.map(|config| RateLimiter::new(config.api_requests_per_second));
 
-        let mut instance = Self {
+        let instance = Self {
             client,
             base_url: DEFAULT_BASE_URL.to_string(),
             ucenter_url: DEFAULT_UCENTER_URL.to_string(),
@@ -130,9 +152,6 @@ impl Pan123Client {
             server_timestamp: Arc::new(Mutex::new(None)),
         };
 
-        instance.init_domains()?;
-        // 动态签名需要服务端时间基准；失败不致命，后续请求会退化到本地时间。
-        let _ = instance.refresh_server_time();
         Ok(instance)
     }
 

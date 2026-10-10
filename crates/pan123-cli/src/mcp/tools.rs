@@ -532,13 +532,13 @@ mod tests {
     use pan123_sdk::FileInfo;
     use serde_json::json as j;
 
-    /// 测试用的客户端。`Pan123Client::new` 会尽力做一次域名发现与服务器时间刷新，
-    /// 两者离线时都软失败；用 OnceLock 让每个测试二进制至多尝试一次。
+    /// 测试用的客户端。用 `offline` 构造：不触发域名发现与服务器时间刷新，
+    /// 因此测试套件不会发出任何网络请求。
     fn test_client() -> Pan123Client {
         static CLIENT: std::sync::OnceLock<Pan123Client> = std::sync::OnceLock::new();
         CLIENT
             .get_or_init(|| {
-                Pan123Client::new(Some("dummy-token".into())).expect("client builds offline")
+                Pan123Client::offline(Some("dummy-token".into())).expect("client builds offline")
             })
             .clone()
     }
