@@ -14,6 +14,9 @@ Cargo.lock
 *.token
 *.credentials
 
+# Claude Code 本地配置（env 段含 API 密钥，禁止入库）
+.claude/settings*.json
+
 # IDE 和编辑器
 .vscode/
 .idea/
