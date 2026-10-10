@@ -43,7 +43,11 @@ pub struct UploadSession {
     pub upload_id: String,
     pub key: String,
     pub bucket: String,
-    #[serde(rename = "storageNode", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "storageNode",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub storage_node: Option<String>,
     #[serde(rename = "sliceSize", default, skip_serializing_if = "Option::is_none")]
     pub slice_size: Option<u64>,
@@ -180,15 +184,31 @@ pub fn save(session: &UploadSession) -> Result<()> {
 }
 
 /// 按「md5 + 父目录 + 文件名 + 大小」精确查找会话。
-pub fn load_exact(md5: &str, parent_id: u64, file_name: &str, file_size: u64) -> Option<UploadSession> {
-    load_exact_in(&config::upload_session_dir(), md5, parent_id, file_name, file_size)
+pub fn load_exact(
+    md5: &str,
+    parent_id: u64,
+    file_name: &str,
+    file_size: u64,
+) -> Option<UploadSession> {
+    load_exact_in(
+        &config::upload_session_dir(),
+        md5,
+        parent_id,
+        file_name,
+        file_size,
+    )
 }
 
 /// 查找可用于本次上传的会话。
 ///
 /// 先精确匹配（md5 + 父目录 + 名称 + 大小）；未命中时退化为「md5 + 父目录」的宽松匹配，
 /// 以覆盖文件名被改动等边缘情况。
-pub fn load_for_file(md5: &str, parent_id: u64, file_name: &str, file_size: u64) -> Option<UploadSession> {
+pub fn load_for_file(
+    md5: &str,
+    parent_id: u64,
+    file_name: &str,
+    file_size: u64,
+) -> Option<UploadSession> {
     load_for_file_in(
         &config::upload_session_dir(),
         md5,
@@ -464,8 +484,14 @@ mod tests {
         let session = sample();
         save_in(&root, &session).unwrap();
 
-        let loaded = load_exact_in(&root, &session.file_md5, 41981424, "demo.bin", 64 * 1024 * 1024)
-            .expect("应能按精确键找回会话");
+        let loaded = load_exact_in(
+            &root,
+            &session.file_md5,
+            41981424,
+            "demo.bin",
+            64 * 1024 * 1024,
+        )
+        .expect("应能按精确键找回会话");
         assert_eq!(loaded.upload_id, "upload-abc");
         assert_eq!(loaded.bucket, "pan123-bucket");
 
@@ -481,11 +507,20 @@ mod tests {
         save_in(&root, &sample()).unwrap();
 
         // 文件名变了，但 md5 + 父目录一致 -> 宽松查找应命中。
-        let found = load_for_file_in(&root, &sample().file_md5, 41981424, "renamed.bin", 64 * 1024 * 1024);
+        let found = load_for_file_in(
+            &root,
+            &sample().file_md5,
+            41981424,
+            "renamed.bin",
+            64 * 1024 * 1024,
+        );
         assert!(found.is_some(), "宽松查找应容忍文件名变化");
 
         // 父目录不同 -> 即便 md5 一致也不应命中。
-        assert!(load_for_file_in(&root, &sample().file_md5, 999, "demo.bin", 64 * 1024 * 1024).is_none());
+        assert!(
+            load_for_file_in(&root, &sample().file_md5, 999, "demo.bin", 64 * 1024 * 1024)
+                .is_none()
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -515,7 +550,14 @@ mod tests {
         .unwrap();
 
         assert!(
-            load_exact_in(&root, &session.file_md5, 41981424, "demo.bin", 64 * 1024 * 1024).is_none()
+            load_exact_in(
+                &root,
+                &session.file_md5,
+                41981424,
+                "demo.bin",
+                64 * 1024 * 1024
+            )
+            .is_none()
         );
         let _ = fs::remove_dir_all(&root);
     }
@@ -526,7 +568,10 @@ mod tests {
         save_in(&root, &sample()).unwrap();
         assert_eq!(list_in(&root).len(), 1);
 
-        assert_eq!(remove_stale_in(&root, &sample().file_md5, "demo.bin", 64 * 1024 * 1024), 1);
+        assert_eq!(
+            remove_stale_in(&root, &sample().file_md5, "demo.bin", 64 * 1024 * 1024),
+            1
+        );
         assert!(list_in(&root).is_empty());
 
         let _ = fs::remove_dir_all(&root);

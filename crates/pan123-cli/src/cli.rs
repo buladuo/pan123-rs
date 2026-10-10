@@ -29,9 +29,29 @@ use rustyline::{CompletionType, Config as RustyConfig, Context, Editor, Helper};
 use crate::icons;
 
 const COMMANDS: &[&str] = &[
-    "login", "info", "pwd", "cd", "ls", "tree", "upload", "download", "mkdir", "rename", "mv",
-    "cp", "rm", "status", "stat", "find", "refresh", "upload-sessions", "clear", "shell", "help",
-    "exit", "quit",
+    "login",
+    "info",
+    "pwd",
+    "cd",
+    "ls",
+    "tree",
+    "upload",
+    "download",
+    "mkdir",
+    "rename",
+    "mv",
+    "cp",
+    "rm",
+    "status",
+    "stat",
+    "find",
+    "refresh",
+    "upload-sessions",
+    "clear",
+    "shell",
+    "help",
+    "exit",
+    "quit",
 ];
 
 #[derive(Debug, Parser)]
@@ -913,7 +933,11 @@ impl Pan123Cli {
             1 => Ok(Some(matches[0].clone())),
             _ => {
                 // 多个匹配，提示用户
-                eprintln!("{}，找到 {} 个匹配:", "文件名不明确".yellow(), matches.len());
+                eprintln!(
+                    "{}，找到 {} 个匹配:",
+                    "文件名不明确".yellow(),
+                    matches.len()
+                );
                 for item in &matches {
                     eprintln!("  - {} (ID: {})", item.file_name, item.file_id);
                 }

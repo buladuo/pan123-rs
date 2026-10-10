@@ -164,12 +164,18 @@ mod tests {
 
         let (k1, v1) = (
             key.to_string(),
-            format!("{ts}-299846-{}", crc32(&format!("{ts}|299846|/b/api/app/config/get|web|3|{key}"))),
+            format!(
+                "{ts}-299846-{}",
+                crc32(&format!("{ts}|299846|/b/api/app/config/get|web|3|{key}"))
+            ),
         );
         assert_eq!(v1, "1791638057-299846-1953120580");
         assert_eq!(k1, "147975487");
 
-        let v2 = format!("{ts}-7622468-{}", crc32(&format!("{ts}|7622468|/b/api/file/info|web|3|{key}")));
+        let v2 = format!(
+            "{ts}-7622468-{}",
+            crc32(&format!("{ts}|7622468|/b/api/file/info|web|3|{key}"))
+        );
         assert_eq!(v2, "1791638057-7622468-182366213");
     }
 

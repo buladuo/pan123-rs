@@ -13,8 +13,8 @@ pub use error::{Pan123Error, Result};
 pub use models::{CwdStore, DownloadTarget, DuplicateMode, FileInfo, UploadTarget};
 pub use rate_limiter::{RateLimiter, RateLimiterConfig};
 pub use secure_storage::{SecureStorage, StorageBackend};
-pub use upload_session::UploadSession;
 pub use transfer::{
     DownloadOptions, ProgressCallback, RetryPolicy, TransferEvent, TransferFailure, TransferKind,
     TransferOptions, UploadDirectoryReport, UploadFailureKind, UploadOptions,
 };
+pub use upload_session::UploadSession;

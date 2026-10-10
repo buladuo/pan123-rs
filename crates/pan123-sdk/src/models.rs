@@ -1,4 +1,4 @@
-﻿use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::fmt;
 use std::path::PathBuf;
@@ -268,10 +268,7 @@ pub struct UploadCompleteData {
     #[serde(rename = "async")]
     pub is_async: Option<bool>,
     /// `upload_complete/result` 轮询建议的等待秒数。
-    #[serde(
-        default,
-        deserialize_with = "deserialize_option_u64_from_any"
-    )]
+    #[serde(default, deserialize_with = "deserialize_option_u64_from_any")]
     pub duration: Option<u64>,
 }
 
