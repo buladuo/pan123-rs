@@ -3011,16 +3011,26 @@ Expected: 无告警、无格式差异。
 
 - [ ] **Step 4: 手工冒烟**
 
-在项目根目录执行（Windows PowerShell）：
+**不要用 PowerShell 管道喂 stdin**：Windows PowerShell 5.1 会给管道内容加上 UTF-8 BOM，
+首行因此解析失败（`-32700`），后续请求又因 `initialize` 未成功而全部收到 `-32600`。
+把请求写进文件再重定向：
 
 ```powershell
-$env:PAN123_TOKEN=""
-'{ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } }
+@'
+{ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } }
 { "jsonrpc": "2.0", "id": 2, "method": "tools/list" }
-{ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "check_token", "arguments": {} } }' | .\target\debug\pan123.exe mcp
+{ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "check_token", "arguments": {} } }
+'@ | Set-Content -Encoding ascii -NoNewline -Path smoke.jsonl
+.\target\debug\pan123.exe mcp < smoke.jsonl
+Remove-Item smoke.jsonl
 ```
 
-Expected：stdout 恰好三行 JSON；每行都能被 `ConvertFrom-Json` 解析；第 3 行的 `result.content[0].text` 提示需要登录；**stdout 中不出现任何非 JSON 内容**。用一个已登录的 token 重跑，第 3 行应显示"登录状态有效"。
+（POSIX 下等价的写法是 `printf '%s\n' '<json>' '<json>' '<json>' | ./target/debug/pan123 mcp`。）
+
+Expected：stdout 恰好三行 JSON；每行都能被 `ConvertFrom-Json` 解析；`tools/list` 返回 18 个工具；
+第 3 行的 `result.content[0].text` 说明登录状态（未登录/已失效时指引去跑 `pan123 login`，且 `isError` 为 `false`）；
+**stdout 中不出现任何非 JSON 内容**。可用 `Out-File` 落盘后检查字节数与转义符，确认没有 ANSI 颜色码（`0x1b`）混入。
+用一个已登录的 token 重跑，第 3 行应显示"登录状态有效"。
 
 - [ ] **Step 5: 提交**
 
