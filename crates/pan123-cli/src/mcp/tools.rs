@@ -1,7 +1,9 @@
-use pan123_sdk::Pan123Client;
+use std::sync::atomic::Ordering;
+
+use pan123_sdk::{FileInfo, Pan123Client, Pan123Error};
 use serde_json::{Value, json};
 
-use crate::mcp::protocol::ToolSpec;
+use crate::mcp::protocol::{CallContext, ToolCallOutcome, ToolHandler, ToolSpec};
 
 pub struct Pan123Tools {
     pub client: Pan123Client,
@@ -33,6 +35,84 @@ pub fn ids_argument(value: &Value, key: &str) -> Result<Vec<u64>, String> {
         .iter()
         .map(|item| id_argument(item, key))
         .collect::<Result<Vec<_>, _>>()
+}
+
+/// 把绝对路径拆成目录段。`/` 或空串返回空向量。拒绝相对路径与 `.` / `..` 段。
+pub fn parse_path_segments(path: &str) -> Result<Vec<String>, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        return Ok(Vec::new());
+    }
+    if !trimmed.starts_with('/') {
+        return Err(format!("路径必须是绝对路径（以 / 开头），收到 {path:?}"));
+    }
+    let mut segments = Vec::new();
+    for segment in trimmed.split('/') {
+        if segment.is_empty() {
+            continue;
+        }
+        if segment == "." || segment == ".." {
+            return Err(format!("路径中不允许出现 . 或 .. 段：{path:?}"));
+        }
+        segments.push(segment.to_string());
+    }
+    Ok(segments)
+}
+
+pub fn format_file_list(items: &[FileInfo]) -> String {
+    if items.is_empty() {
+        return "该目录为空".to_string();
+    }
+    items
+        .iter()
+        .map(|item| {
+            if item.is_dir() {
+                format!("[目录] {} (id={})", item.file_name, item.file_id)
+            } else {
+                format!(
+                    "[文件] {} (id={}, {} 字节)",
+                    item.file_name, item.file_id, item.size
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 把 Pan123Error 翻译成给模型看的、可操作的说明。
+pub fn explain_error(err: &Pan123Error) -> String {
+    match err {
+        Pan123Error::AuthRequired | Pan123Error::InvalidToken => {
+            "登录状态无效。请让用户在终端执行 `pan123 login` 扫码登录后重试。".to_string()
+        }
+        Pan123Error::NotFound(what) => format!("未找到：{what}。请确认 file_id 是否正确。"),
+        Pan123Error::Cancelled => "操作已被取消。".to_string(),
+        Pan123Error::InvalidPath(path) => format!("路径不合法：{path}。"),
+        other => format!("操作失败：{other}"),
+    }
+}
+
+/// 把闭包里的 SDK 调用收敛成统一的 outcome，顺带做取消检查。
+fn run_read_only<F>(ctx: &CallContext, operation: F) -> ToolCallOutcome
+where
+    F: FnOnce() -> Result<String, Pan123Error>,
+{
+    if ctx.cancel.load(Ordering::SeqCst) {
+        return ToolCallOutcome {
+            text: "操作已被取消。".into(),
+            is_error: true,
+        };
+    }
+    match operation() {
+        Ok(text) => ToolCallOutcome {
+            text,
+            is_error: false,
+        },
+        Err(err) => ToolCallOutcome {
+            text: explain_error(&err),
+            is_error: true,
+        },
+    }
 }
 
 fn spec(
@@ -249,6 +329,102 @@ pub fn tool_specs() -> Vec<ToolSpec> {
     ]
 }
 
+impl ToolHandler for Pan123Tools {
+    fn list_tools(&self) -> Vec<ToolSpec> {
+        tool_specs()
+    }
+
+    fn call(&self, name: &str, args: &Value, ctx: &CallContext) -> ToolCallOutcome {
+        match name {
+            "list_files" => run_read_only(ctx, || {
+                let parent_id = match args.get("parent_id") {
+                    Some(value) => {
+                        id_argument(value, "parent_id").map_err(Pan123Error::Operation)?
+                    }
+                    None => 0,
+                };
+                let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(100) as u32;
+                let items = self.client.get_file_list(parent_id, 1, limit)?;
+                Ok(format!(
+                    "目录 {} 下共 {} 项：\n{}",
+                    parent_id,
+                    items.len(),
+                    format_file_list(&items)
+                ))
+            }),
+            "get_file_info" => run_read_only(ctx, || {
+                let raw = args
+                    .get("file_ids")
+                    .ok_or_else(|| Pan123Error::Operation("缺少参数 file_ids".into()))?;
+                let ids = ids_argument(raw, "file_ids").map_err(Pan123Error::Operation)?;
+                let items = self.client.get_file_info(&ids)?;
+                Ok(format_file_list(&items))
+            }),
+            "get_path" => run_read_only(ctx, || {
+                let raw = args
+                    .get("file_id")
+                    .ok_or_else(|| Pan123Error::Operation("缺少参数 file_id".into()))?;
+                let id = id_argument(raw, "file_id").map_err(Pan123Error::Operation)?;
+                let chain = self.client.get_path_chain(id)?;
+                let path = chain
+                    .iter()
+                    .map(|item| item.file_name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                Ok(format!("/{} (id={})", path, id))
+            }),
+            "user_info" => run_read_only(ctx, || {
+                Ok(serde_json::to_string_pretty(&self.client.get_user_info()?)?)
+            }),
+            "check_token" => {
+                use pan123_sdk::TokenCheckStatus;
+                let text = match self.client.check_token_status() {
+                    TokenCheckStatus::Valid => "登录状态有效。".to_string(),
+                    TokenCheckStatus::Missing => {
+                        "尚未登录。请让用户在终端执行 `pan123 login` 扫码登录。".to_string()
+                    }
+                    TokenCheckStatus::Invalid => {
+                        "登录已失效。请让用户在终端执行 `pan123 login` 重新扫码。".to_string()
+                    }
+                    TokenCheckStatus::Unreachable(message) => {
+                        format!("无法验证登录状态（网络问题）：{message}")
+                    }
+                };
+                ToolCallOutcome {
+                    text,
+                    is_error: false,
+                }
+            }
+            "resolve_path" => run_read_only(ctx, || {
+                let raw = args
+                    .get("path")
+                    .ok_or_else(|| Pan123Error::Operation("缺少参数 path".into()))?;
+                let path = raw
+                    .as_str()
+                    .ok_or_else(|| Pan123Error::Operation("参数 path 必须是字符串".into()))?;
+                let segments = parse_path_segments(path).map_err(Pan123Error::Operation)?;
+                let mut current = 0u64;
+                for segment in &segments {
+                    let folder = self.client.find_child_folder_by_name(current, segment)?;
+                    match folder {
+                        Some(item) => current = item.file_id,
+                        None => {
+                            return Err(Pan123Error::NotFound(format!(
+                                "路径 {path} 中的目录 {segment}"
+                            )));
+                        }
+                    }
+                }
+                Ok(format!("{} -> file_id={}", path, current))
+            }),
+            other => ToolCallOutcome {
+                text: format!("未知工具：{other}"),
+                is_error: true,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,5 +527,114 @@ mod tests {
     fn ids_argument_rejects_non_array() {
         let err = ids_argument(&json!(5), "file_ids").unwrap_err();
         assert!(err.contains("file_ids"));
+    }
+
+    use pan123_sdk::FileInfo;
+    use serde_json::json as j;
+
+    /// 测试用的客户端。`Pan123Client::new` 会尽力做一次域名发现与服务器时间刷新，
+    /// 两者离线时都软失败；用 OnceLock 让每个测试二进制至多尝试一次。
+    fn test_client() -> Pan123Client {
+        static CLIENT: std::sync::OnceLock<Pan123Client> = std::sync::OnceLock::new();
+        CLIENT
+            .get_or_init(|| {
+                Pan123Client::new(Some("dummy-token".into())).expect("client builds offline")
+            })
+            .clone()
+    }
+
+    fn file(id: u64, parent: u64, name: &str, file_type: u8, size: u64) -> FileInfo {
+        serde_json::from_value(j!({
+            "FileId": id,
+            "ParentFileId": parent,
+            "FileName": name,
+            "Type": file_type,
+            "Size": size
+        }))
+        .expect("fixture should deserialize")
+    }
+
+    #[test]
+    fn parse_path_segments_splits_absolute_path() {
+        assert_eq!(
+            parse_path_segments("/备份/2026").unwrap(),
+            vec!["备份", "2026"]
+        );
+    }
+
+    #[test]
+    fn parse_path_segments_root_is_empty() {
+        assert_eq!(parse_path_segments("/").unwrap(), Vec::<String>::new());
+        assert_eq!(parse_path_segments("").unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn parse_path_segments_rejects_relative_path() {
+        let err = parse_path_segments("备份/2026").unwrap_err();
+        assert!(err.contains("绝对路径"), "错误信息：{err}");
+    }
+
+    #[test]
+    fn parse_path_segments_rejects_dot_segments() {
+        assert!(parse_path_segments("/a/../b").is_err());
+        assert!(parse_path_segments("/a/.").is_err());
+    }
+
+    #[test]
+    fn format_file_list_marks_directories_and_sizes() {
+        let items = vec![file(1, 0, "照片", 1, 0), file(2, 0, "报告.pdf", 0, 2048)];
+        let text = format_file_list(&items);
+        assert!(text.contains("照片"), "缺少目录名：{text}");
+        assert!(text.contains("[目录]"), "缺少目录标记：{text}");
+        assert!(text.contains("报告.pdf"), "缺少文件名：{text}");
+        assert!(text.contains("2048"), "缺少大小：{text}");
+    }
+
+    #[test]
+    fn format_file_list_reports_empty_directory() {
+        assert!(format_file_list(&[]).contains("空"));
+    }
+
+    #[test]
+    fn unknown_tool_returns_is_error() {
+        let client = test_client();
+        let tools = Pan123Tools { client };
+        let ctx = crate::mcp::protocol::CallContext {
+            progress: crate::mcp::protocol::ProgressSink::discarding(),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let outcome = tools.call("no_such_tool", &j!({}), &ctx);
+        assert!(outcome.is_error);
+        assert!(outcome.text.contains("no_such_tool"));
+    }
+
+    #[test]
+    fn resolve_path_on_root_needs_no_api_call() {
+        let client = test_client();
+        let tools = Pan123Tools { client };
+        let ctx = crate::mcp::protocol::CallContext {
+            progress: crate::mcp::protocol::ProgressSink::discarding(),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let outcome = tools.call("resolve_path", &j!({ "path": "/" }), &ctx);
+        assert!(
+            !outcome.is_error,
+            "根目录解析不应依赖网络：{}",
+            outcome.text
+        );
+        assert!(outcome.text.contains('0'));
+    }
+
+    #[test]
+    fn invalid_id_argument_returns_is_error_naming_the_key() {
+        let client = test_client();
+        let tools = Pan123Tools { client };
+        let ctx = crate::mcp::protocol::CallContext {
+            progress: crate::mcp::protocol::ProgressSink::discarding(),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let outcome = tools.call("get_file_info", &j!({ "file_ids": ["abc"] }), &ctx);
+        assert!(outcome.is_error);
+        assert!(outcome.text.contains("file_ids"), "实际：{}", outcome.text);
     }
 }
