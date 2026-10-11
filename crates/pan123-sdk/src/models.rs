@@ -2,6 +2,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::fmt;
 use std::path::PathBuf;
+use url::Url;
 
 fn deserialize_option_u64_from_any<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
 where
@@ -136,9 +137,37 @@ pub struct QrGenerateData {
 }
 
 impl QrGenerateData {
-    /// 返回可直接生成二维码的登录地址。
+    /// 构造真正可扫的二维码内容。
+    ///
+    /// `qr-code/generate` 返回的 `url` 是一个**不带任何查询参数的基址**
+    /// （实测为 `https://yun.123pan.cn/wx-app-login.html`），`uniID` 是独立字段。
+    /// H5 页面靠 `location.search` 读取 `uniID`，缺失时页面上的
+    /// `POST /api/user/qr-code/scan` 会返回 `uniID为必填字段`（code -1），
+    /// 于是 App/微信扫码后没有任何反应。若把接口下发的 `url` 原样编码成二维码，
+    /// 就等于扫了一个「什么都不会发生」的网页。
+    ///
+    /// 因此这里把 `uniID`（以及页面用来选环境的 `env`）合并进 `url`。
+    /// 若 `url` 已经带了 `uniID`（服务端未来改成直接下发完整地址），则原样返回。
     pub fn scan_url(&self) -> Option<String> {
-        self.url.clone().filter(|value| !value.is_empty())
+        let base = self
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+
+        // 服务端已下发完整地址时不做任何改写。
+        if let Ok(parsed) = Url::parse(base)
+            && parsed
+                .query_pairs()
+                .any(|(key, _)| key.eq_ignore_ascii_case("uniID"))
+        {
+            return Some(base.to_string());
+        }
+
+        let mut parsed = Url::parse(base).ok()?;
+        parsed.query_pairs_mut().append_pair("env", "production");
+        parsed.query_pairs_mut().append_pair("uniID", &self.uni_id);
+        Some(parsed.to_string())
     }
 }
 
@@ -329,4 +358,71 @@ pub enum UploadTarget {
 pub enum DownloadTarget {
     Single(u64),
     Batch(Vec<u64>),
+}
+
+#[cfg(test)]
+mod qr_scan_url_tests {
+    use super::QrGenerateData;
+
+    fn parse(data: &str) -> QrGenerateData {
+        serde_json::from_str(data).expect("deserialize QrGenerateData")
+    }
+
+    #[test]
+    fn appends_uniid_to_bare_url_from_api() {
+        // 真实抓包响应：url 是无查询参数的基址，uniID 独立下发。
+        let data = parse(
+            r#"{"url":"https://yun.123pan.cn/wx-app-login.html","uniID":"f49a77ee-0a4d-4ca9-a359-b7d27f9182c7"}"#,
+        );
+        let url = data.scan_url().expect("scan url");
+        let parsed = url::Url::parse(&url).expect("valid url");
+        let pairs: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+        assert_eq!(
+            pairs.get("uniID").map(String::as_str),
+            Some(data.uni_id.as_str())
+        );
+        assert_eq!(pairs.get("env").map(String::as_str), Some("production"));
+        assert_eq!(parsed.path(), "/wx-app-login.html");
+    }
+
+    #[test]
+    fn keeps_url_untouched_when_uniid_already_present() {
+        let raw = "https://www.123pan.com/wx-app-login.html?env=production&uniID=abc&type=login";
+        let data = parse(&format!(r#"{{"url":"{raw}","uniID":"abc"}}"#));
+        assert_eq!(data.scan_url().as_deref(), Some(raw));
+    }
+
+    #[test]
+    fn preserves_existing_query_params() {
+        let data = parse(
+            r#"{"url":"https://www.123pan.com/wx-app-login.html?source=123pan","uniID":"abc"}"#,
+        );
+        let url = data.scan_url().expect("scan url");
+        let parsed = url::Url::parse(&url).expect("valid url");
+        assert!(
+            parsed
+                .query_pairs()
+                .any(|(key, value)| key == "source" && value == "123pan")
+        );
+        assert!(
+            parsed
+                .query_pairs()
+                .any(|(k, v)| k == "uniID" && v == "abc")
+        );
+    }
+
+    #[test]
+    fn returns_none_when_url_absent_or_blank() {
+        let missing = parse(r#"{"uniID":"abc"}"#);
+        assert!(missing.scan_url().is_none());
+        let blank = parse(r#"{"url":"   ","uniID":"abc"}"#);
+        assert!(blank.scan_url().is_none());
+    }
+
+    #[test]
+    fn deserializes_legacy_payload_without_url() {
+        let data = parse(r#"{"uniID":"abc"}"#);
+        assert_eq!(data.uni_id, "abc");
+        assert!(data.url.is_none());
+    }
 }
