@@ -120,19 +120,26 @@ if errorlevel 1 (
 echo.
 for /f "tokens=*" %%i in ('"%INSTALL_DIR%\%BINARY_NAME%" --version 2^>nul') do set NEW_VERSION=%%i
 
-REM 安装 Claude Skill（可选）
-if exist "%~dp0skills" (
-    echo.
-    set /p INSTALL_SKILL=是否一并安装 Claude Code Skill 到 %USERPROFILE%\.claude\skills ? ^(y/N^): 
-    if /i "!INSTALL_SKILL!"=="y" (
-        if not exist "%USERPROFILE%\.claude\skills" mkdir "%USERPROFILE%\.claude\skills"
-        xcopy /E /I /Y "%~dp0skills\pan123-mcp" "%USERPROFILE%\.claude\skills\pan123-mcp" >nul
-        xcopy /E /I /Y "%~dp0skills\pan123-cli" "%USERPROFILE%\.claude\skills\pan123-cli" >nul
-        echo ? Skill 已安装
-        echo.
-        echo 接入 MCP 客户端，在配置中加入:
-        echo   { "mcpServers": { "pan123": { "command": "pan123", "args": ["mcp"] } } }
+REM 配置 AI 客户端（MCP + Skill），逻辑与 install.sh 共用同一个 Python 脚本
+set "SETUP_SCRIPT=%~dp0scripts\setup_clients.py"
+set "PY_CMD="
+for %%C in (python python3 py) do (
+    if not defined PY_CMD (
+        %%C -c "import json" >nul 2>&1 && set "PY_CMD=%%C"
     )
+)
+
+if not defined PY_CMD (
+    echo.
+    echo [警告] 未找到可用的 python，跳过 AI 客户端自动配置
+    echo 请手动在各客户端配置中加入:
+    echo   { "mcpServers": { "pan123": { "command": "pan123", "args": ["mcp"] } } }
+) else (
+    set "SKILL_ARG="
+    if exist "%~dp0skills" set "SKILL_ARG=--skill-src "%~dp0skills""
+    echo.
+    !PY_CMD! "%SETUP_SCRIPT%" --home "%USERPROFILE%" !SKILL_ARG!
+    if errorlevel 1 echo [警告] 部分客户端配置失败，可手动配置或重跑本脚本
 )
 echo.
 echo ========================================

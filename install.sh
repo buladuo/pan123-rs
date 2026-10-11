@@ -104,26 +104,45 @@ echo ""
 echo -e "安装版本: ${NEW_VERSION}"
 echo -e "安装位置: ${INSTALL_DIR}/${BINARY_NAME}"
 
-# 安装 Claude Skill（可选）
-SKILL_SRC_DIR="$(cd "$(dirname "$0")" && pwd)/skills"
-SKILL_DEST_DIR="${HOME}/.claude/skills"
+# ============================================================
+# AI 客户端配置（MCP + Skill）
+# ============================================================
 
-if [ -d "${SKILL_SRC_DIR}" ]; then
-    echo ""
-    if [ -t 0 ]; then
-        read -p "是否一并安装 Claude Code Skill 到 ${SKILL_DEST_DIR}? (y/N): " -n 1 -r || true
-        echo
-    fi
-    if [[ ${REPLY:-} =~ ^[Yy]$ ]]; then
-        mkdir -p "${SKILL_DEST_DIR}"
-        cp -R "${SKILL_SRC_DIR}/pan123-mcp" "${SKILL_DEST_DIR}/"
-        cp -R "${SKILL_SRC_DIR}/pan123-cli" "${SKILL_DEST_DIR}/"
-        echo -e "${GREEN}✓ Skill 已安装到 ${SKILL_DEST_DIR}${NC}"
-        echo ""
-        echo -e "${YELLOW}接入 MCP 客户端：${NC}在客户端配置中加入"
+configure_ai_clients() {
+    local SCRIPT_DIR SKILL_SRC PY
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    SKILL_SRC="${SCRIPT_DIR}/skills"
+
+    # 查找可用的 python。注意：Windows 上 `python3` 常是 Microsoft Store 的
+    # 占位符——`command -v` 找得到但一执行就失败，所以必须实际跑一次验证。
+    PY=""
+    local candidate
+    for candidate in python3 python; do
+        if command -v "${candidate}" >/dev/null 2>&1 &&
+            "${candidate}" -c "import json" >/dev/null 2>&1; then
+            PY="${candidate}"
+            break
+        fi
+    done
+
+    if [ -z "${PY}" ]; then
+        echo -e "${YELLOW}未找到可用的 python，跳过 AI 客户端自动配置。${NC}"
+        echo -e "${YELLOW}请手动在各客户端配置中加入：${NC}"
         echo '  { "mcpServers": { "pan123": { "command": "pan123", "args": ["mcp"] } } }'
+        return 0
     fi
-fi
+
+    local ARGS=(--home "${HOME}")
+    if [ -d "${SKILL_SRC}" ]; then
+        ARGS+=(--skill-src "${SKILL_SRC}")
+    fi
+
+    if ! "${PY}" "${SCRIPT_DIR}/scripts/setup_clients.py" "${ARGS[@]}"; then
+        echo -e "${YELLOW}部分客户端配置失败，可手动配置或重跑本脚本。${NC}"
+    fi
+}
+
+configure_ai_clients
 
 echo ""
 echo -e "${YELLOW}快速开始:${NC}"

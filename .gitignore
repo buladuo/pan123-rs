@@ -51,3 +51,5 @@ desktop.ini
 
 # 参考文件
 *.py
+# 但安装脚本需要它来配置 AI 客户端，必须纳入版本控制
+!scripts/setup_clients.py

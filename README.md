@@ -21,7 +21,37 @@
 
 本工具内置 MCP（Model Context Protocol）服务器，可让你的 AI 客户端直接操作 123 云盘。
 
-在客户端配置中加入：
+配置后可用 18 个工具完成浏览、查找、整理、上传、下载等操作，传输过程会上报进度，且支持取消。
+
+> MCP 服务器**无状态**：没有“当前目录”，每个操作都要显式指定 `parent_id`（根目录为 `0`）。
+
+### 自动配置
+
+运行 `./install.sh`（或 `install.bat`）时会在安装完成后自动配置下列客户端。
+也可以单独重跑（幂等，已存在的条目会跳过，不会覆盖你的自定义配置）：
+
+```bash
+python3 scripts/setup_clients.py --skill-src ./skills
+```
+
+| 客户端 | MCP 配置 | Skill 安装 |
+|---|---|---|
+| Claude Code | `~/.claude.json` | `~/.claude/skills/` |
+| Codex | `~/.codex/config.toml` | 不支持（Codex 无 skill 机制） |
+| CodeBuddy | `~/.codebuddy/mcp.json` | `~/.codebuddy/skills/` |
+| WorkBuddy | `~/.workbuddy/mcp.json` | `~/.workbuddy/skills/` |
+
+可选参数：`--only "Codex"`（只配置指定客户端，可重复）、`--home PATH`（指定目标用户目录）。
+
+配置完成后：
+
+1. **重启客户端**加载新配置；
+2. 在你自己的终端执行一次 `pan123 login` 扫码登录——各客户端共享同一份登录态，只需登录一次；
+3. **WorkBuddy 需额外到「自定义连接器 → MCP 服务管理」点「信任」才会生效**（MCP 不支持热加载）。
+
+### 手动配置
+
+任意支持 stdio 的 MCP 客户端均可接入，在其配置中加入：
 
 ```json
 {
@@ -31,22 +61,10 @@
 }
 ```
 
-Claude Code 用户可以执行 `claude mcp add pan123 -- pan123 mcp` 完成配置。
-
-配置后可用 18 个工具完成浏览、查找、整理、上传、下载等操作，传输过程会上报进度，且支持取消。
-
-> MCP 服务器**无状态**：没有“当前目录”，每个操作都要显式指定 `parent_id`（根目录为 `0`）。
-
-### Claude Skill
+### Skill
 
 仓库 `skills/` 下提供两个 Skill：`pan123-mcp`（面向已配 MCP 的客户端）与 `pan123-cli`（面向命令行）。
-
-运行 `./install.sh`（或 `install.bat`）时会提示是否一并安装到 `~/.claude/skills/`。也可手动复制：
-
-```bash
-mkdir -p ~/.claude/skills
-cp -R skills/pan123-mcp skills/pan123-cli ~/.claude/skills/
-```
+Claude Code、CodeBuddy 与 WorkBuddy 的 Skill 格式一致，安装脚本会自动复制到上表对应目录。
 
 ## 安装
 
